@@ -686,6 +686,10 @@ touch UX**: keep it minimal but always functional.
 - On-device debugging uses **eruda** (a mobile DevTools console) injected in the
   game's `index.html`; it loads only on touch devices, or on any device when the
   URL carries `?eruda`.
+- Gameplay on touch is **landscape-only**: in portrait the game shows a button
+  that, on tap (the required user gesture), enters fullscreen and locks the
+  orientation to landscape (best-effort; some browsers, e.g. iOS, ignore the
+  lock).
 - **Rule:** never ship a gameplay feature that can only be tested on desktop.
 
 ---

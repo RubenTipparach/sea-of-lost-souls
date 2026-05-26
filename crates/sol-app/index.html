@@ -30,6 +30,24 @@
         font-family: system-ui, sans-serif;
         pointer-events: none;
       }
+      /* Touch-only prompt to enter landscape + fullscreen (portrait only). */
+      #go-landscape {
+        position: fixed;
+        left: 50%;
+        bottom: 24px;
+        transform: translateX(-50%);
+        z-index: 10;
+        padding: 14px 22px;
+        border: 1px solid #2b6cb0;
+        border-radius: 10px;
+        background: #0b1a2b;
+        color: #cfe0f5;
+        font: 600 16px/1.2 system-ui, sans-serif;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+      }
+      #go-landscape[hidden] {
+        display: none;
+      }
     </style>
     <!-- eruda: on-device DevTools console for mobile testing. Loads only on
          touch devices, or on any device when the URL carries ?eruda. -->
@@ -53,5 +71,60 @@
   </head>
   <body>
     <div id="loading">Initializing fleet intelligence&hellip;</div>
+    <button id="go-landscape" type="button" hidden>Rotate to landscape</button>
+    <script>
+      // On touch devices we only support landscape. While the device is in
+      // portrait, show a button that (on tap, the required user gesture) enters
+      // fullscreen and locks the orientation to landscape.
+      (function () {
+        var btn = document.getElementById("go-landscape");
+        if (!btn) return;
+        var touch =
+          (navigator.maxTouchPoints || 0) > 0 ||
+          /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+        if (!touch) return;
+
+        function portrait() {
+          return (
+            !!window.matchMedia &&
+            window.matchMedia("(orientation: portrait)").matches
+          );
+        }
+        function refresh() {
+          btn.hidden = !portrait();
+        }
+        function goLandscape() {
+          var el = document.documentElement;
+          var fs =
+            el.requestFullscreen ||
+            el.webkitRequestFullscreen ||
+            el.mozRequestFullScreen;
+          var entered = fs
+            ? Promise.resolve(fs.call(el)).catch(function () {})
+            : Promise.resolve();
+          entered.then(function () {
+            if (screen.orientation && screen.orientation.lock) {
+              screen.orientation.lock("landscape").catch(function () {});
+            }
+            refresh();
+          });
+        }
+        btn.addEventListener("click", goLandscape);
+        window.addEventListener("orientationchange", refresh);
+        document.addEventListener("fullscreenchange", refresh);
+        if (window.matchMedia) {
+          var mq = window.matchMedia("(orientation: portrait)");
+          try {
+            mq.addEventListener("change", refresh);
+          } catch (e) {
+            // Older Safari uses the deprecated addListener.
+            try {
+              mq.addListener(refresh);
+            } catch (e2) {}
+          }
+        }
+        refresh();
+      })();
+    </script>
   </body>
 </html>
