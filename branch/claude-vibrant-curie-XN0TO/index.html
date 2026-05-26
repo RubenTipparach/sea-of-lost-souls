@@ -34,8 +34,8 @@
     <!-- Trunk injects the wasm-bindgen bootstrap that calls the `start` entry. -->
     
 <script type="module">
-import init, * as bindings from '/sol-app-70990c572de09869.js';
-const wasm = await init({ module_or_path: '/sol-app-70990c572de09869_bg.wasm' });
+import init, * as bindings from './sol-app-70990c572de09869.js';
+const wasm = await init({ module_or_path: './sol-app-70990c572de09869_bg.wasm' });
 
 
 window.wasmBindings = bindings;
@@ -44,7 +44,7 @@ window.wasmBindings = bindings;
 dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
 
 </script>
-  <link rel="modulepreload" href="/sol-app-70990c572de09869.js" crossorigin="anonymous" integrity="sha384-r5YSNbfR2V+JBuIcDVO4SMdpQk1vMi/FzbUpxJHsB0UOejjeKVuc5Yn+WRH+/sfq"><link rel="preload" href="/sol-app-70990c572de09869_bg.wasm" crossorigin="anonymous" integrity="sha384-A12SO94BXtSsGgWhtpiVRhWiXlo/sOhsO9WERs2Fffnt/rDVKzQ7sJy4ml2nOGLk" as="fetch" type="application/wasm"></head>
+  <link rel="modulepreload" href="./sol-app-70990c572de09869.js" crossorigin="anonymous" integrity="sha384-r5YSNbfR2V+JBuIcDVO4SMdpQk1vMi/FzbUpxJHsB0UOejjeKVuc5Yn+WRH+/sfq"><link rel="preload" href="./sol-app-70990c572de09869_bg.wasm" crossorigin="anonymous" integrity="sha384-A12SO94BXtSsGgWhtpiVRhWiXlo/sOhsO9WERs2Fffnt/rDVKzQ7sJy4ml2nOGLk" as="fetch" type="application/wasm"></head>
   <body>
     <div id="loading">Initializing fleet intelligence&hellip;</div>
   </body>
