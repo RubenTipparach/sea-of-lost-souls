@@ -1,4 +1,4 @@
-//! `sol-procgen` — seeded procedural generation for Sea of Lost Souls.
+//! `sol-procgen` - seeded procedural generation for Sea of Lost Souls.
 //!
 //! STUB. This crate will host the seeded generators shared by `sol-sim`
 //! (deterministic gameplay geometry/fields: gravity wells, sensor occlusion,

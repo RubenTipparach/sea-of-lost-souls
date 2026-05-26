@@ -4,14 +4,14 @@ Guidance for Claude (and human contributors) working in this repository.
 
 **Sea of Lost Souls** is a 3D, Homeworld-style space RTS with a roguelike
 campaign, built in **Rust + wgpu**, targeting the **web browser first** and
-desktop second. The full blueprint is in [`design.md`](./design.md) — read it
+desktop second. The full blueprint is in [`design.md`](./design.md) - read it
 before making non-trivial changes.
 
 ---
 
 ## ⚠️ Hard rule: asset generation (static vs. procedural)
 
-> **All game models and their textures MUST be statically generated** —
+> **All game models and their textures MUST be statically generated** -
 > authored in the ship editor and compiled ahead of time into runtime assets.
 >
 > **The ONLY things generated procedurally at runtime are:**
@@ -34,7 +34,7 @@ peers and builds. Environments benefit from seedable variety and reactivity.
 (See `design.md` §14.)
 
 If a change would generate any ship/station model or texture at runtime, **stop
-and reconsider** — it violates this rule.
+and reconsider** - it violates this rule.
 
 ---
 
@@ -53,8 +53,8 @@ progress; consult `design.md` §12 & §18 for the intended layout.)
 | `crates/sol-assets` | Runtime loading of compiled `.ship` data + GLB. |
 | `crates/sol-shipc` | CLI: compiles & validates authored ships → runtime assets. |
 | `editor/` | Web ship editor (Three.js + TypeScript + Vite). |
-| `assets/ships/<id>/` | **Authored** ship defs (`model.glb` + `ship.json`) — committed. |
-| `assets/compiled/` | Build output — **git-ignored**, produced by `sol-shipc`. |
+| `assets/ships/<id>/` | **Authored** ship defs (`model.glb` + `ship.json`) - committed. |
+| `assets/compiled/` | Build output - **git-ignored**, produced by `sol-shipc`. |
 | `shaders/` | WGSL shaders. |
 
 ---
@@ -64,7 +64,7 @@ progress; consult `design.md` §12 & §18 for the intended layout.)
 - **`sol-sim` must stay deterministic and pure.** No rendering, no `SystemTime`/
   wall-clock, no OS/thread RNG (use the seeded sim RNG), no unordered iteration
   that affects state. Determinism is what makes lockstep multiplayer and tests
-  possible — retrofitting it later is brutal, so respect it from day one.
+  possible - retrofitting it later is brutal, so respect it from day one.
 - **Rendering never feeds gameplay.** `sol-render` reads sim state; it must not
   write back into `sol-sim`. Visual procedural detail may be device-dependent;
   gameplay-affecting fields live in `sol-sim` and are deterministic.
@@ -75,7 +75,7 @@ progress; consult `design.md` §12 & §18 for the intended layout.)
   desktop-only code. Prefer single-threaded-safe designs unless we deliberately
   enable wasm threads (which require the COOP/COEP service-worker shim on Pages).
 - **Authored assets are the source of truth.** Commit `model.glb` + `ship.json`;
-  never commit `assets/compiled/`. `sol-shipc` is the gate — bad colliders or
+  never commit `assets/compiled/`. `sol-shipc` is the gate - bad colliders or
   invalid ship data should fail the build.
 - **Keep the `ship.json` schema in sync** between the editor (writer) and
   `sol-shipc`/`sol-assets` (readers). It is the contract between the two
@@ -88,7 +88,7 @@ progress; consult `design.md` §12 & §18 for the intended layout.)
 > Scaffolding-dependent; update this section as crates land.
 
 ```bash
-# Native game (desktop) — once sol-app exists
+# Native game (desktop) - once sol-app exists
 cargo run -p sol-app
 
 # Web game (needs: rustup target add wasm32-unknown-unknown; cargo install trunk)
@@ -112,12 +112,12 @@ cargo test --workspace
 
 ## CI / deployment
 
-- **Every commit on every branch builds and deploys to GitHub Pages** —
+- **Every commit on every branch builds and deploys to GitHub Pages** -
   intentionally **no main-branch gate** (see `design.md` §17). The default
   branch is the canonical URL at the site root; other branches deploy to
   `branch/<slug>/` previews.
 - Tests/lint run for signal but **must not block the deploy** (per the brief).
-  Still, **keep `fmt`/`clippy`/`test` green** — don't land obviously broken code.
+  Still, **keep `fmt`/`clippy`/`test` green** - don't land obviously broken code.
 - `sol-shipc` runs in CI before the wasm build; invalid ship assets fail that
   step.
 
@@ -125,6 +125,11 @@ cargo test --workspace
 
 ## Conventions
 
+- **No em dashes (or en dashes), ever.** Do not use the em dash (Unicode
+  U+2014) or en dash (U+2013) in any file: prose, comments, and string literals
+  included. Use a spaced hyphen, comma, colon, parentheses, or two sentences;
+  use a plain hyphen for numeric ranges. This rule applies repo-wide and is
+  enforced by sweeping all tracked text files.
 - **Formatting/lint:** `cargo fmt` + `cargo clippy` for Rust; the editor uses its
   own TS lint/format config under `editor/`.
 - **Math:** use `glam` types throughout.

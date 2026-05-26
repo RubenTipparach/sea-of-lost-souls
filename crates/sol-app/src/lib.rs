@@ -1,4 +1,4 @@
-//! `sol-app` — the entry point that wires winit + `sol-render` together and
+//! `sol-app` - the entry point that wires winit + `sol-render` together and
 //! drives the Homeworld-style orbit camera. Native opens a window; wasm grabs a
 //! canvas (see [`start`]). The test interceptor mesh is loaded from its GLB
 //! (with a code-generated placeholder fallback if loading fails).
@@ -244,7 +244,7 @@ pub fn run() {
 /// to a code-generated placeholder so the app always runs.
 fn load_ship_mesh() -> CpuMesh {
     // On native, try the on-disk GLB. (On web, assets are bundled differently;
-    // for the scaffold we use the placeholder there — see the wasm note.)
+    // for the scaffold we use the placeholder there - see the wasm note.)
     #[cfg(not(target_arch = "wasm32"))]
     {
         for path in [
@@ -267,7 +267,7 @@ fn load_ship_mesh() -> CpuMesh {
 }
 
 /// A simple code-generated ship silhouette used if the GLB can't be loaded.
-/// (Renderer fallback only — NOT a substitute for the authored asset.)
+/// (Renderer fallback only - NOT a substitute for the authored asset.)
 fn placeholder_ship_mesh() -> CpuMesh {
     // A single elongated tetra-ish hull: enough to confirm the renderer works.
     let v = |p: Vec3, n: Vec3| Vertex::new(p, n);

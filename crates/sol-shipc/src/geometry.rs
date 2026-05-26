@@ -2,7 +2,7 @@
 //!
 //! NOTE: ships are normally STATIC authored assets (see CLAUDE.md hard rule).
 //! This generator is a build-time tool that produces the *authored* `model.glb`
-//! committed to the repo — it is NOT runtime ship generation. It exists so the
+//! committed to the repo - it is NOT runtime ship generation. It exists so the
 //! scaffold has a real, valid ship asset to compile and render.
 
 use glam::Vec3;

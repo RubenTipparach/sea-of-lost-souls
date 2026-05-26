@@ -1,5 +1,5 @@
 // Authoring schema shared with the Rust pipeline (sol-shipc / sol-assets).
-// This MUST stay in sync with assets/ships/<id>/ship.json — it is the contract
+// This MUST stay in sync with assets/ships/<id>/ship.json - it is the contract
 // between the editor (writer) and the deterministic engine (reader).
 // See design.md §15 & §16.
 
@@ -82,7 +82,7 @@ export interface ShipDef {
   hardpoints: Hardpoint[];
 }
 
-// Canonical default — matches assets/ships/test_interceptor/ship.json so that
+// Canonical default - matches assets/ships/test_interceptor/ship.json so that
 // Export produces a valid, pipeline-ready file immediately.
 export function defaultShipDef(): ShipDef {
   return {

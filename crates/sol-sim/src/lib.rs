@@ -1,10 +1,10 @@
-//! `sol-sim` — the deterministic simulation core of Sea of Lost Souls.
+//! `sol-sim` - the deterministic simulation core of Sea of Lost Souls.
 //!
 //! INVARIANT: this crate MUST stay deterministic and pure. No rendering, no
 //! wall-clock (`SystemTime`/`Instant`), no OS/thread RNG, no unordered
 //! iteration that affects state. Bit-identical simulation across native and
 //! wasm is what makes lockstep multiplayer and reproducible tests possible
-//! (see `design.md` §12–§13). Randomness flows only from the seeded [`Rng`]
+//! (see `design.md` §12-§13). Randomness flows only from the seeded [`Rng`]
 //! below.
 
 #![forbid(unsafe_code)]

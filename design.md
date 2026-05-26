@@ -1,11 +1,11 @@
-# Sea of Lost Souls — Design Document
+# Sea of Lost Souls - Design Document
 
 > A 3D, Homeworld-style space RTS with roguelike campaign structure, built in
 > Rust + wgpu, targeting the **web browser first** and desktop second.
 >
 > You command not a hero unit but a *fleet intelligence*. The camera is your
 > body. The mothership is your heart. The void is full of derelicts and the
-> crews who died aboard them — salvage them, capture them, and learn their
+> crews who died aboard them - salvage them, capture them, and learn their
 > secrets before the sea swallows you too.
 
 This is a living design document. It captures intent, the technical plan, and
@@ -57,13 +57,13 @@ technologies you pry from the dead.
 | **The fleet is precious** | Few ships, expensive to build, painful to lose. Every hull matters. | Disposable spam armies; build-order races. |
 | **Space is a 3D place, not a plane** | Full volumetric movement, the famous Homeworld move-disk, attacks from above/below. | 2D-on-a-plane RTS with a fixed top-down camera. |
 | **You command, you don't pilot** | The player is fleet intelligence; the camera is its sensorium. Orders, not twitch. | Direct flight-sim piloting of a single ship. |
-| **The universe pushes back** | Environments are simulated and reactive — they respond to your tactics and become hazards or tools. | Static skyboxes and inert "decoration" hazards. |
+| **The universe pushes back** | Environments are simulated and reactive - they respond to your tactics and become hazards or tools. | Static skyboxes and inert "decoration" hazards. |
 | **Salvage over manufacture** | Capturing and mastering enemy ships is the smart economy; building is the desperate one. | Pure factory economies with infinite reinforcements. |
 | **Web-first, no install** | It runs in a browser tab at a URL, on every commit. | Desktop-only, heavyweight installers as the primary path. |
 
 ### Theme
 
-The title is literal. The battlespace is a graveyard — drifting derelicts,
+The title is literal. The battlespace is a graveyard - drifting derelicts,
 ghost-quiet hulls adrift in nebulas, crews lost to the dark. Your fleet sails
 this sea, and the central tension is *moral and mechanical entanglement with
 the dead*: you survive by taking what they left behind, but every captured ship
@@ -90,7 +90,7 @@ carries an unfamiliar crew, alien systems, and risk.
 In *Homeworld* the player is a disembodied fleet command bound to a persistent
 mothership. We make that literal and mechanical:
 
-- The **camera is the player's presence** in the world — a sensor point of view
+- The **camera is the player's presence** in the world - a sensor point of view
   that exists *in* the simulation, not floating above it.
 - What the camera/fleet can *see* is governed by the [sensors model](#6-ship-simulation-model):
   fog of war, nebula occlusion, active vs. passive detection. The camera is not
@@ -100,8 +100,8 @@ mothership. We make that literal and mechanical:
   and where captured crews are interned and re-trained. **Lose the Ark and the
   run ends.** Building ships exposes it (see [§4](#4-fleet-ships--scarcity)).
 
-This conceit lets us unify three things players usually treat separately —
-*camera, fog of war, and the run's win/lose condition* — into one coherent
+This conceit lets us unify three things players usually treat separately -
+*camera, fog of war, and the run's win/lose condition* - into one coherent
 fiction.
 
 ---
@@ -119,7 +119,7 @@ flowchart LR
     C --> D[Tactical Battle / Salvage / Event]
     D --> E[Resolve: resources, salvage, crew, damage]
     E --> F{Ark survived?}
-    F -->|no| G[Run ends — bank meta-progress]
+    F -->|no| G[Run ends - bank meta-progress]
     F -->|yes| B
     B -->|reach the deep| H[Sector Boss / Anomaly]
     H --> I[Next sector or victory]
@@ -132,7 +132,7 @@ flowchart LR
 
 - **Resources** are scarce and carried between encounters: *Salvage* (raw
   matter for repair/build), *Power Cells* (deployable energy reserves),
-  *Crew* (the rarest resource — people don't respawn), and *Intel* (unlocks
+  *Crew* (the rarest resource - people don't respawn), and *Intel* (unlocks
   research within the run).
 - **Permadeath** at the run level: destroyed ships and dead crew are gone for
   the run. The Ark's destruction ends the run.
@@ -144,7 +144,7 @@ flowchart LR
 - A **persistent research tree** ([§5](#5-crew-capture--research)) unlocks
   across runs: new starting loadouts, the *ability* to operate certain captured
   alien hull classes, crew doctrines, Ark modules.
-- Meta-progression is about **capability and knowledge, not raw power** — you
+- Meta-progression is about **capability and knowledge, not raw power** - you
   unlock *understanding* of exotic tech, not stat boosts. This keeps each run a
   test of tactics, not a grind wall.
 
@@ -170,9 +170,9 @@ individually simulated** ([§6](#6-ship-simulation-model)).
 Building at the Ark is intentionally painful:
 
 - **Costly** in Salvage *and* Crew (a new hull needs people to run it).
-- **Slow** — construction takes real encounter time; you can't build mid-fight
+- **Slow** - construction takes real encounter time; you can't build mid-fight
   and expect it to arrive.
-- **Dangerous** — an active construction bay forces the Ark to lower defenses /
+- **Dangerous** - an active construction bay forces the Ark to lower defenses /
   divert reactor power (an explicit power trade-off in the [energy model](#6-ship-simulation-model)),
   making it **vulnerable**. Enemies that detect a building Ark will press the
   advantage.
@@ -180,7 +180,7 @@ Building at the Ark is intentionally painful:
 ### Capturing is the *smart* economy
 
 The cheaper path to a bigger fleet is **taking** ships
-([§5](#5-crew-capture--research)) — but it is risky, situational, and gated by
+([§5](#5-crew-capture--research)) - but it is risky, situational, and gated by
 research and crew acclimation. This is the central economic tension: *manufacture
 exposes your heart; salvage entangles you with the dead.*
 
@@ -207,7 +207,7 @@ flowchart TD
     A[Target enemy ship] --> B[Disable it: knock out engines + weapons,<br/>or deplete/suppress its crew]
     B --> C[Send boarding frigate / marine pods]
     C --> D[Boarding action: attacker crew vs defender crew<br/>resolved over time inside the hull]
-    D -->|attacker wins| E[Ship captured — but UNFAMILIAR]
+    D -->|attacker wins| E[Ship captured - but UNFAMILIAR]
     D -->|defender wins / scuttle| F[Boarding fails, crew lost]
     E --> G[Operates at reduced capability:<br/>locked subsystems, lower efficiency]
     G --> H[Crew acclimation + research unlocks potential]
@@ -221,7 +221,7 @@ A freshly captured alien ship is **not** immediately a full asset:
   and through **research** ([Intel](#3-core-loop--roguelike-campaign) spent at
   the Ark).
 - **Mastery:** with enough proficiency + the right research-tree branch
-  unlocked, the ship reaches full potential — sometimes exceeding anything you
+  unlocked, the ship reaches full potential - sometimes exceeding anything you
   could build.
 
 ### Research tree (branches)
@@ -229,15 +229,15 @@ A freshly captured alien ship is **not** immediately a full asset:
 Research spans **within-run** (Intel unlocks tactical capability this run) and
 **meta** (persistent across runs). Proposed branches:
 
-- **Xenotech mastery** — per-civilization branches (each captured faction's
+- **Xenotech mastery** - per-civilization branches (each captured faction's
   hull classes, weapons, and subsystems). Unlocks the *ability* to fully operate
   their ships.
-- **Reactor & Power** — better energy throughput, capacitor tech, conduit
+- **Reactor & Power** - better energy throughput, capacitor tech, conduit
   resilience.
-- **Doctrine** — crew training: boarding, damage-control, gunnery, sensors.
-- **Ark modules** — production speed, additional bays, defensive upgrades,
+- **Doctrine** - crew training: boarding, damage-control, gunnery, sensors.
+- **Ark modules** - production speed, additional bays, defensive upgrades,
   research throughput.
-- **Survey** — better sensors, anomaly analysis, safer navigation of hazards.
+- **Survey** - better sensors, anomaly analysis, safer navigation of hazards.
 
 > Design rule: meta-progression unlocks **knowledge and access**, not flat
 > stat inflation. The fun is "now I can crew a Vaered dreadnought," not "+10%
@@ -267,7 +267,7 @@ A ship is a small **power network**:
 - Power flows along **conduits** (edges with capacity) to a bus and out to
   **subsystems** (nodes that consume power).
 - **Capacitors** buffer energy for bursty loads (weapon volleys).
-- The player sets **allocation priorities** across subsystems — the core
+- The player sets **allocation priorities** across subsystems - the core
   tactical economy of a single ship (evoking bridge-sim games like *FTL* /
   Star Trek bridge management, layered onto an RTS). Overdrive engines for a
   flanking run and your shields sag; charge weapons for an alpha strike and
@@ -277,7 +277,7 @@ A ship is a small **power network**:
 
 > The power grid is a small graph solved each tick (clamp flows to conduit
 > capacity, distribute by priority, drain/charge capacitors). It is fully
-> deterministic and lives in the simulation crate (`sol-sim`) — critical for
+> deterministic and lives in the simulation crate (`sol-sim`) - critical for
 > [lockstep multiplayer](#13-multiplayer-peer-to-peer).
 
 ### 6.2 Subsystems
@@ -301,7 +301,7 @@ inside the hull) authored in the [ship editor](#16-web-based-ship-editor).
   authored in the editor, used for hit detection and selection.
 - Subsystems have **internal positions + colliders**. A shot that defeats
   shields and penetrates the hull can damage a *specific* subsystem based on
-  impact location and penetration — enabling targeted tactics (kill their
+  impact location and penetration - enabling targeted tactics (kill their
   engines to prevent escape; kill weapons to safely board).
 - **Shields are faceted/directional** (e.g., 6 facings). Flanking and
   positioning matter: hit the weak facing.
@@ -319,23 +319,23 @@ inside the hull) authored in the [ship editor](#16-web-based-ship-editor).
 - **Casualties** from breaches, fire, life-support loss, and **boarding**
   (attacker vs. defender resolution inside the hull over time).
 - **Damage control:** crew can be tasked to repair subsystems, fight fires, or
-  repel boarders — a within-ship micro-economy of attention.
+  repel boarders - a within-ship micro-economy of attention.
 
 ### 6.5 Sensors, emissions & fog of war
 
-- **Active sensors:** long range, high resolution — but **broadcast your
+- **Active sensors:** long range, high resolution - but **broadcast your
   position** (emissions detectable by enemies). 
 - **Passive sensors:** stealthy, shorter range, lower resolution.
 - The environment modulates sensing: **nebulas occlude**, **ion storms jam**,
   **pulsars wash out** passive sensors with periodic sweeps. This ties the
   sensor model directly to the [reactive universe](#8-reactive-environments).
-- Fog of war is the player's *actual* knowledge — consistent with the
+- Fog of war is the player's *actual* knowledge - consistent with the
   [camera-as-character](#the-camera-as-character-conceit) conceit.
 
 ### 6.6 Flight & movement model
 
 Homeworld ships are **not** free-floating Newtonian bodies and **not**
-rigid-body physics props — they fly with an *arcade* model: a top speed, finite
+rigid-body physics props - they fly with an *arcade* model: a top speed, finite
 acceleration, a turn rate, and banking into turns. They arrive and stop; they
 don't drift forever. We adopt the same, scaled by **mass class**:
 
@@ -354,18 +354,18 @@ Movement integration runs in `sol-sim` at the **fixed timestep**
 ### 6.7 Collision model (and the Homeworld lineage)
 
 Observably, Homeworld ships **mostly avoid** each other and only
-**occasionally collide** — and when they do, they don't ricochet like billiard
+**occasionally collide** - and when they do, they don't ricochet like billiard
 balls. Across the series the behavior matured from HW1's looser
 avoidance/overlap (capital ships could foul each other, and ramming dealt
 damage) to HW2's tighter formation-flying and avoidance. We want that *feel*:
-graceful avoidance first, gentle (and damaging) contact second — never bouncy
+graceful avoidance first, gentle (and damaging) contact second - never bouncy
 rigid-body chaos.
 
 Our approach is **avoidance-first kinematic motion with soft contact response**:
 
 1. **Avoidance (primary):** a *separation* steering term keeps ships spaced;
    local avoidance steers around obstacles (other hulls, asteroids) along the
-   path. Most "collisions" are prevented before they happen — this is what sells
+   path. Most "collisions" are prevented before they happen - this is what sells
    the Homeworld look.
 2. **Broad phase:** a spatial structure (uniform grid or BVH, e.g. parry's
    `Qbvh`) sized to the encounter finds candidate overlaps cheaply.
@@ -373,25 +373,25 @@ Our approach is **avoidance-first kinematic motion with soft contact response**:
    hulls/compounds ([§6.3](#63-structure-hitboxes--positional-damage)) produce
    contacts.
 4. **Soft response (no restitution):** on real contact we apply a **gentle
-   separation impulse + velocity damping**, scaled by **mass** — fighters get
+   separation impulse + velocity damping**, scaled by **mass** - fighters get
    shoved aside, capital ships barely budge, and nothing bounces. Relative
    momentum at impact deals **ram damage** (and can be a deliberate tactic).
 5. **Continuous collision detection (CCD):** fast ships (and all projectiles)
    are swept along their path each tick so they can't tunnel through thin hulls
-   — essential for both fairness and determinism.
+   - essential for both fairness and determinism.
 
 > **Library choice: `parry3d`, not `rapier3d`.** We want collision *queries* and
 > a custom kinematic response, not a dynamics solver. `rapier` (forces,
 > restitution, joints) would fight us by making things bounce and by adding
 > solver nondeterminism. `parry3d` gives us raycasts, shape-casts, contact
-> generation, convex decomposition, and the BVH — exactly what a space RTS needs
-> — while we own the motion and response rules. (Tumbling *wreckage/debris*, if
+> generation, convex decomposition, and the BVH - exactly what a space RTS needs
+> - while we own the motion and response rules. (Tumbling *wreckage/debris*, if
 > we add it, is a **render-only, non-deterministic** flourish that may use a
 > throwaway dynamics pass which never touches `sol-sim`.)
 
 ### 6.8 Ballistics & projectiles
 
-Per the brief, **every bullet is physical but deterministic** — no abstract
+Per the brief, **every bullet is physical but deterministic** - no abstract
 "dice-roll" hit chances on ballistic weapons.
 
 - **Projectiles are entities** in `sol-sim` with position + velocity, integrated
@@ -400,32 +400,32 @@ Per the brief, **every bullet is physical but deterministic** — no abstract
 - **Firing solution:** when a mount fires at a moving target it computes a
   deterministic **lead/intercept** (solve for the interception point given
   projectile speed and target velocity). Slow guns must lead fast ships; fast
-  ships can juke slow rounds — emergent, skill-expressive combat.
+  ships can juke slow rounds - emergent, skill-expressive combat.
 - **Hit detection = swept query (CCD):** each tick, ray/shape-cast the
   projectile's segment of travel against candidate colliders via `parry3d`. No
   tunneling, frame-rate-independent, deterministic.
 - **Weapon archetypes:**
-  - *Kinetic / pulse* — discrete projectiles as above.
-  - *Beam* — an instantaneous ray (still a deterministic `parry3d` raycast);
+  - *Kinetic / pulse* - discrete projectiles as above.
+  - *Beam* - an instantaneous ray (still a deterministic `parry3d` raycast);
     continuous power draw.
-  - *Missile / torpedo* — a **guided** projectile: deterministic
+  - *Missile / torpedo* - a **guided** projectile: deterministic
     pursuit/proportional-navigation steering toward the target, with fuel/turn
     limits (so it can be outmaneuvered or flared).
 - **Impact resolution (deterministic, positional):** at the hit point we
-  resolve, in order — **shield facing** → **hull section** → **subsystem** (by
+  resolve, in order - **shield facing** → **hull section** → **subsystem** (by
   which internal collider the penetrating shot struck;
   [§6.3](#63-structure-hitboxes--positional-damage)). This is what makes "shoot
   their engines" real and ties weapons to the
   [capture loop](#5-crew-capture--research).
 - **Gravity / fields:** projectile integration reads the deterministic
-  environmental fields ([§8](#8-reactive-environments)) — gravity wells curve
-  trajectories; magnetar/ion fields perturb or disrupt — all on the coarse CPU
+  environmental fields ([§8](#8-reactive-environments)) - gravity wells curve
+  trajectories; magnetar/ion fields perturb or disrupt - all on the coarse CPU
   sim so every peer agrees.
 
 ### 6.9 Determinism in the physics sim (non-negotiable for multiplayer)
 
 [Lockstep multiplayer](#13-multiplayer-peer-to-peer) requires that movement,
-collision, and ballistics produce **bit-identical** results on every peer —
+collision, and ballistics produce **bit-identical** results on every peer -
 including **wasm vs. native**. The physics layer is the hardest part of that
 promise, so we design for it from day one:
 
@@ -460,9 +460,9 @@ promise, so we design for it from day one:
 ## 7. The Procedural Universe
 
 The battlespace is **procedurally generated** per encounter (seeded for
-reproducibility and multiplayer sync). It must feel like a *place* — vast,
-volumetric, and dangerous — not a backdrop. (Ships are the exception: they are
-**static, authored assets** — see [§14](#14-asset-strategy-static-vs-procedural).)
+reproducibility and multiplayer sync). It must feel like a *place* - vast,
+volumetric, and dangerous - not a backdrop. (Ships are the exception: they are
+**static, authored assets** - see [§14](#14-asset-strategy-static-vs-procedural).)
 
 ### Environment elements
 
@@ -481,14 +481,14 @@ volumetric, and dangerous — not a backdrop. (Ships are the exception: they are
 ### Determinism & seeding
 
 - Each encounter is generated from a **seed** (derived from the run seed + node
-  id). Same seed ⇒ same universe on every peer — required for
+  id). Same seed ⇒ same universe on every peer - required for
   [lockstep multiplayer](#13-multiplayer-peer-to-peer) and for reproducible
   bug reports.
 - **Two representations** of the procedural world:
-  - **Gameplay/deterministic** — coarse fields and collider geometry on the CPU
+  - **Gameplay/deterministic** - coarse fields and collider geometry on the CPU
     in `sol-sim` (gravity, sensor occlusion, hazard intensity). Drives
     simulation and must be identical across peers.
-  - **Visual** — high-resolution volumetrics on the GPU in `sol-render`,
+  - **Visual** - high-resolution volumetrics on the GPU in `sol-render`,
     derived from the same seed but allowed to be device-dependent (it never
     feeds back into gameplay). See [§11](#11-rendering-architecture-wgpu).
 
@@ -496,7 +496,7 @@ volumetric, and dangerous — not a backdrop. (Ships are the exception: they are
 
 ## 8. Reactive Environments
 
-The universe is not just procedural — it is **simulated and reactive**. Player
+The universe is not just procedural - it is **simulated and reactive**. Player
 and AI tactics perturb environmental fields, which feed back into both visuals
 and gameplay. This is a headline feature.
 
@@ -506,7 +506,7 @@ and gameplay. This is a headline feature.
 2. Firing **energy weapons** (and certain subsystem events) **injects charge**
    into the local field.
 3. Past a threshold the region **ignites into an ion storm**: heightened, more
-   dangerous conditions — sensor jamming, shield disruption, arc damage,
+   dangerous conditions - sensor jamming, shield disruption, arc damage,
    chaotic lighting.
 4. The storm is now a **shared hazard and a weapon**: bait an enemy into a
    nebula, provoke the storm with your own fire, and let it savage their
@@ -522,7 +522,7 @@ and gameplay. This is a headline feature.
 - `sol-render` reads the *same* field state to drive **visual intensity**
   (denser, angrier volumetrics; lightning; color shifts) at high resolution.
 - Because the gameplay field is coarse and deterministic, **all peers see the
-  same storm evolve** from the same actions — reactivity is multiplayer-safe.
+  same storm evolve** from the same actions - reactivity is multiplayer-safe.
 
 > Generalization: any "anomaly" can expose an injectable/decaying field with
 > threshold behaviors. Supernova shockwaves, magnetar surges, and pulsar sweeps
@@ -539,7 +539,7 @@ the **command camera** and **3D order issuing** (the move-disk), plus classic
 ### 9.1 The command camera (Homeworld "sensors sphere")
 
 **How Homeworld actually does it (reference).** The camera is a *focus-orbit*
-camera — never a free-fly/FPS camera. Its state is `(focus point, distance,
+camera - never a free-fly/FPS camera. Its state is `(focus point, distance,
 yaw, pitch)` with **world-up preserved** (the horizon never rolls) and pitch
 clamped. Everything orbits a focus:
 
@@ -551,13 +551,13 @@ clamped. Everything orbits a focus:
   the focus; hold **`Alt`** to lock onto and orbit a specific entity under the
   cursor (the usual way you fly the view around a battle).
 - **Zoom & camera height:** the **mouse wheel** dollies in/out. Zooming fully
-  out opens the **Sensors Manager** — a flattened, abstracted tactical sphere of
+  out opens the **Sensors Manager** - a flattened, abstracted tactical sphere of
   the whole battlespace where you can still select and issue orders.
 - **Pan** the focus with the arrow keys (forward/back/left/right) and
   `Insert`/`Delete` (up/down).
 
 > Exact bindings differ across Homeworld 1, 2, and Remastered and are all
-> rebindable; the *model* — focus-orbit, sensors view, focus cycling — is the
+> rebindable; the *model* - focus-orbit, sensors view, focus cycling - is the
 > constant, and that is what we implement.
 
 **Our model** adopts this directly:
@@ -568,24 +568,24 @@ clamped. Everything orbits a focus:
   focus-on-selection (`F`), focus-on-Ark (`Home`), cycle focus.
 - Far zoom → **sensors view** (icons/vectors, readable at fleet scale; orders
   still issuable).
-- Momentum-eased and framerate-independent — the camera *is* the player, so it
+- Momentum-eased and framerate-independent - the camera *is* the player, so it
   must feel like an extension of intent. The focus tracks moving selections.
 
-### 9.2 Issuing 3D orders — the move-disk
+### 9.2 Issuing 3D orders - the move-disk
 
 Moving in true 3D with a 2D mouse is *the* Homeworld problem, solved by the
 **movement disc**. The exact Homeworld flow:
 
-1. With ships selected, press **`M`** (Move) — a horizontal **disc** (the "blue
+1. With ships selected, press **`M`** (Move) - a horizontal **disc** (the "blue
    circle") appears, centered on the selection at its current altitude.
-2. **Move the mouse** to slide the destination across the disc — this sets the
+2. **Move the mouse** to slide the destination across the disc - this sets the
    **X/Z** position (and how far).
-3. To set **altitude (Y)**: **hold `Shift` and drag the mouse up/down** — a
+3. To set **altitude (Y)**: **hold `Shift` and drag the mouse up/down** - a
    vertical guide line lifts the destination above/below the disc plane.
 4. **Click** to confirm. Ships path to the 3D point, preserving formation.
 
-A plain **right-click** also issues a context order — *move* to empty space,
-*attack* on an enemy — but the `M`-disc is the precise 3D tool. We implement
+A plain **right-click** also issues a context order - *move* to empty space,
+*attack* on an enemy - but the `M`-disc is the precise 3D tool. We implement
 both: RMB context-orders for speed, and the `M`-disc (`Shift`+vertical for
 altitude) for deliberate positioning, drawing a clear gizmo (disc, altitude
 pole, destination ghost, formation preview).
@@ -595,7 +595,7 @@ Supporting order tools (Homeworld defaults shown):
   **Guard** (`G`), **Dock** (`D`), **Hyperspace/jump** (`J`).
 - **Formation & facing** on arrival; **formations** (Delta, Broad, Wall, X,
   Claw, Sphere, …).
-- **Tactics stance:** *Evasive / Neutral / Aggressive* — changes how units
+- **Tactics stance:** *Evasive / Neutral / Aggressive* - changes how units
   engage and reposition.
 - **Power presets** (our addition): per-selection energy allocation ("engines
   hot," "weapons free," "rig for silent running").
@@ -620,7 +620,7 @@ Supporting order tools (Homeworld defaults shown):
   route.
 - **Guard / escort** a ship or volume; **patrol** via waypoints.
 - **Subsystem targeting (Homeworld 2):** against capital ships you can target
-  specific **subsystems** — engines, turrets, production, sensors. This maps
+  specific **subsystems** - engines, turrets, production, sensors. This maps
   directly onto our
   [positional-damage model](#63-structure-hitboxes--positional-damage): kill
   engines to prevent escape, kill weapons to move in safely and **board**
@@ -646,7 +646,7 @@ Supporting order tools (Homeworld defaults shown):
 | Waypoints / Stop / Guard / Dock / Jump | `W` / `S` / `G` / `D` / `J` | |
 | Control group set/recall | `Ctrl+N` / `N` | |
 | Tactics stance | hotkey cycle | Evasive/Neutral/Aggressive |
-| Power preset | `1`–`4` on hotbar | Per-selection allocation |
+| Power preset | `1`-`4` on hotbar | Per-selection allocation |
 
 > Bindings are data-driven and fully rebindable; defaults mirror Homeworld
 > Remastered where applicable. Touch/controller are out of scope for the slice,
@@ -689,7 +689,7 @@ The brief calls for a **simple, immediate-mode GUI** layered on wgpu. We use
 
 **Web-first** dictates the rendering plan. We target **WebGPU** as the primary
 backend (Chrome/Edge stable; Firefox and Safari shipping support through
-2024–2025) with a **reduced-quality WebGL2 fallback** that `wgpu` provides
+2024-2025) with a **reduced-quality WebGL2 fallback** that `wgpu` provides
 transparently for raster, plus graceful feature-detection for the parts that
 need compute.
 
@@ -721,8 +721,8 @@ need compute.
   distance and by camera zoom (sensors view simplifies).
 - **Procedural meshes (asteroids):** generated on the GPU/CPU at encounter load,
   **instanced** across asteroid fields. (Asteroids are a permitted procedural
-  exception — see [§14](#14-asset-strategy-static-vs-procedural).)
-- **Planets:** sphere shaders — noise terrain, atmospheric scattering — runtime.
+  exception - see [§14](#14-asset-strategy-static-vs-procedural).)
+- **Planets:** sphere shaders - noise terrain, atmospheric scattering - runtime.
 - **Anomalies:** black-hole **lensing** as a screen-space post effect over an
   accretion volumetric; pulsar beams and supernova shells as animated
   volumetrics driven by the [reactive fields](#8-reactive-environments).
@@ -761,7 +761,7 @@ need compute.
 > specifically, and reactive volumetric rendering is a core pillar we want to
 > own. So we hand-roll the **renderer** while borrowing mature crates for
 > everything that isn't rendering (including `bevy_ecs` as a *library*). If the
-> renderer becomes a sink, full Bevy is the documented fallback — but that is a
+> renderer becomes a sink, full Bevy is the documented fallback - but that is a
 > deliberate, later decision, not the default.
 
 ### Crate layout (Cargo workspace)
@@ -806,7 +806,7 @@ possible.
 
 > **Status: draft / forward-looking.** Single-player and the
 > [vertical slice](#19-vertical-slice-milestone-0) come first. But because
-> determinism is *architectural*, we design the sim for it from day one — retro-
+> determinism is *architectural*, we design the sim for it from day one - retro-
 > fitting determinism later is brutal.
 
 ### Model: deterministic lockstep
@@ -815,10 +815,10 @@ RTS with few units → the classic, proven approach is **deterministic lockstep*
 (the *Age of Empires* model), not state replication or per-entity rollback:
 
 - Every peer runs the **identical** `sol-sim` on the **same seed**.
-- Peers exchange only **commands** (orders), not world state — tiny bandwidth,
+- Peers exchange only **commands** (orders), not world state - tiny bandwidth,
   scales with players not entities.
 - Commands are scheduled **N turns in the future** (input delay, e.g.,
-  100–250 ms of "turns") so all peers have every command before simulating that
+  100-250 ms of "turns") so all peers have every command before simulating that
   turn. The sim advances a turn only when all peers' commands for it are in.
 
 ```mermaid
@@ -836,7 +836,7 @@ sequenceDiagram
 
 - **`matchbox`** gives browser-to-browser **WebRTC data channels** (and works
   natively), with a lightweight **signaling server** (`matchbox_server`) used
-  only to introduce peers — gameplay traffic is peer-to-peer.
+  only to introduce peers - gameplay traffic is peer-to-peer.
 - Unreliable-ordered channels for command turns (with our own small
   retransmit/ack for the turn protocol); reliable channel for lobby/handshake.
 - For small skirmishes, **`ggrs`** (GGPO-style rollback) over matchbox is a
@@ -845,7 +845,7 @@ sequenceDiagram
 
 ### The hard part: determinism
 
-Lockstep lives or dies on **bit-identical simulation across machines** —
+Lockstep lives or dies on **bit-identical simulation across machines** -
 including **wasm vs. native** and different GPUs/CPUs:
 
 - **Fixed timestep**, fixed iteration order (stable entity ordering), seeded RNG.
@@ -858,13 +858,13 @@ including **wasm vs. native** and different GPUs/CPUs:
 - **Desync detection:** each peer hashes a **state checksum** every K turns and
   exchanges it; mismatch → halt, report the turn, and dump state for diffing.
 - **Recovery:** on desync, fall back to a one-time **state resync** from an
-  agreed peer (designated by lowest peer-id) — a pragmatic safety net for a P2P
+  agreed peer (designated by lowest peer-id) - a pragmatic safety net for a P2P
   game without a server.
 
 ### Security caveats (be honest)
 
 - **P2P lockstep has no authority**, so it is vulnerable to **"maphack"-style**
-  information cheats (a modified client can ignore fog of war) — a known,
+  information cheats (a modified client can ignore fog of war) - a known,
   accepted RTS trade-off. We mitigate *state-altering* cheats because divergence
   trips the checksum, but we cannot fully prevent passive information cheats
   without a server.
@@ -879,7 +879,7 @@ This is a **hard project rule** (mirrored in `CLAUDE.md`):
 
 > **All game models and their textures MUST be statically generated
 > (authored + compiled ahead of time).**
-> **Exceptions — generated procedurally at runtime — are: the space
+> **Exceptions - generated procedurally at runtime - are: the space
 > environment (nebulas, dust, anomalies, fields), planets, and (optionally)
 > asteroids.**
 
@@ -899,7 +899,7 @@ This is a **hard project rule** (mirrored in `CLAUDE.md`):
   all peers and builds. Authored+compiled assets give us that guarantee; runtime
   procedural ship generation would threaten determinism and balance.
 - **Environments benefit from variety and reactivity.** Procedural nebulas and
-  anomalies give endless, seedable, *reactive* battlespaces — and they don't
+  anomalies give endless, seedable, *reactive* battlespaces - and they don't
   need to be bit-identical *visually*, only their coarse gameplay fields do
   (which are generated deterministically from the seed in `sol-sim`).
 
@@ -932,9 +932,9 @@ subsystem anchors so geometry and sim data stay spatially aligned.
 
 For each ship, under `assets/ships/<ship_id>/`:
 
-- `model.glb` — geometry + PBR materials + **baked static textures** + named
+- `model.glb` - geometry + PBR materials + **baked static textures** + named
   anchor nodes (hardpoints, subsystem mounts, shield-facing origins).
-- `ship.json` — the **ship definition**: metadata, subsystems, hardpoints,
+- `ship.json` - the **ship definition**: metadata, subsystems, hardpoints,
   colliders, power network, crew requirements, balance stats. (Authoring format
   = JSON for editor interop.)
 
@@ -987,7 +987,7 @@ flowchart LR
     B[assets/ships/*/ship.json] --> C
     C --> V{Validate}
     V -->|colliders watertight/convex,<br/>nodes exist, power graph valid,<br/>crew/draw sane| OK[OK]
-    V -->|fail| ERR[Build fails — bad asset]
+    V -->|fail| ERR[Build fails - bad asset]
     OK --> D[(compiled/ship_id.ship<br/>binary: geometry refs + colliders<br/>+ sim data, content-hashed)]
     OK --> E[(compiled/ship_id.glb<br/>optimized/validated mesh)]
 ```
@@ -999,7 +999,7 @@ flowchart LR
 - **Emits** a compact **runtime binary** (`bincode`/`rkyv`) bundling collider
   shapes + power network + hardpoints + crew data, **content-hashed** for cache-
   busting and version pinning, plus an optimized/validated `.glb`.
-- Is the **gate that keeps bad ships out of the build** — and, crucially, keeps
+- Is the **gate that keeps bad ships out of the build** - and, crucially, keeps
   ship data **identical across all peers** for lockstep.
 
 > The compiled outputs live in `assets/compiled/` (git-ignored) and are produced
@@ -1055,17 +1055,17 @@ no install.
 ## 17. Build & Deployment Pipeline
 
 **Continuous delivery, no gates.** Per the brief: **every commit on any branch
-builds and deploys to GitHub Pages.** There is **no main-branch gate** — the
+builds and deploys to GitHub Pages.** There is **no main-branch gate** - the
 default branch is simply the canonical URL; every other branch gets a live
 preview.
 
 ### What gets built
 
-1. **Asset compile** — run `sol-shipc` over `assets/ships/**` → `assets/compiled/`.
-2. **Game (wasm)** — `trunk build --release` of `sol-app` (wgpu + egui),
+1. **Asset compile** - run `sol-shipc` over `assets/ships/**` → `assets/compiled/`.
+2. **Game (wasm)** - `trunk build --release` of `sol-app` (wgpu + egui),
    producing the web bundle (wasm + JS glue + assets).
-3. **Ship editor** — `vite build` of `editor/` (Three.js/TS).
-4. **Assemble site** — game at the root, editor at `editor/`, deployed under a
+3. **Ship editor** - `vite build` of `editor/` (Three.js/TS).
+4. **Assemble site** - game at the root, editor at `editor/`, deployed under a
    **per-branch path**.
 
 ### Deploy layout (GitHub Pages)
@@ -1094,7 +1094,7 @@ preview.
 name: build-and-deploy
 on:
   push:
-    branches: ["**"]          # every branch, every commit — no gates
+    branches: ["**"]          # every branch, every commit - no gates
 permissions:
   contents: write             # to push to gh-pages
 concurrency:
@@ -1155,7 +1155,7 @@ jobs:
 
 > CI **builds and deploys** on every commit, intentionally without correctness
 > gates. We still run **tests/lint as a separate, non-blocking job** for signal
-> (and may make them blocking later if desired) — but they never stop a deploy,
+> (and may make them blocking later if desired) - but they never stop a deploy,
 > per the brief.
 
 ---
@@ -1203,7 +1203,7 @@ sea-of-lost-souls/
 
 ## 19. Vertical Slice (Milestone 0)
 
-The first **simple slice** — deliberately small, proving the spine end-to-end.
+The first **simple slice** - deliberately small, proving the spine end-to-end.
 Three deliverables, all live on GitHub Pages from the first commit:
 
 ### A. In-engine tactical slice (`sol-app` + `sol-sim` + `sol-render`)
@@ -1220,7 +1220,7 @@ Three deliverables, all live on GitHub Pages from the first commit:
   interpolation.
 - Minimal **egui HUD:** selection list + a stub power/health panel
   ([§10](#10-ui--hud)).
-- *(No combat, no real subsystems yet — movement, selection, camera, and the
+- *(No combat, no real subsystems yet - movement, selection, camera, and the
   rendering/sim/interpolation spine.)*
 
 ### B. Web ship editor MVP (`editor/`)
@@ -1228,7 +1228,7 @@ Three deliverables, all live on GitHub Pages from the first commit:
 - Import/preview a GLB, place a **hull convex-hull collider** + a couple of
   **hardpoint/subsystem anchors**, and **export** `model.glb` + `ship.json`
   ([§16](#16-web-based-ship-editor)).
-- Just enough to author the placeholder ships the slice consumes — closing the
+- Just enough to author the placeholder ships the slice consumes - closing the
   loop **editor → pipeline → game**.
 
 ### C. The pipeline itself (`sol-shipc` + CI)
@@ -1309,12 +1309,12 @@ complete.
 | **Desync** | Divergence of peers' simulations; detected via state checksums. |
 | **Reactive field** | A coarse, deterministic environmental grid (ion charge, gravity, radiation) that gameplay perturbs and reads. |
 | **Hardpoint** | A named anchor on a ship hull for a weapon/subsystem mount, authored in the editor. |
-| **`sol-sim`** | The deterministic simulation crate — multiplayer source of truth, no rendering. |
+| **`sol-sim`** | The deterministic simulation crate - multiplayer source of truth, no rendering. |
 | **`sol-shipc`** | The CLI that compiles & validates authored ships into runtime assets. |
 | **Acclimation** | Crew gaining proficiency with a captured ship's exotic tech over time + research. |
 
 ---
 
-*End of document. This is a draft blueprint meant to evolve — propose changes
+*End of document. This is a draft blueprint meant to evolve - propose changes
 via PR. Keep `CLAUDE.md` in sync with any change to the static-asset rule or the
 build/deploy contract.*

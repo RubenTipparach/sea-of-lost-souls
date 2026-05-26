@@ -1,4 +1,4 @@
-//! `sol-render` — the wgpu renderer for Sea of Lost Souls.
+//! `sol-render` - the wgpu renderer for Sea of Lost Souls.
 //!
 //! A deliberately small but real renderer: instance/adapter/device/queue,
 //! a configured surface, a depth buffer, an orbit camera packed into a uniform

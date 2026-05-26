@@ -2,7 +2,7 @@
 //!
 //! INVARIANT: this is the ONLY source of randomness allowed in `sol-sim`. It
 //! is seeded explicitly and contains no OS/thread entropy, so the same seed
-//! yields the same stream on every platform (native and wasm) — required for
+//! yields the same stream on every platform (native and wasm) - required for
 //! lockstep determinism. Do NOT replace this with `rand`'s thread RNG.
 //!
 //! Reference: M. E. O'Neill, "PCG: A Family of Simple Fast Space-Efficient

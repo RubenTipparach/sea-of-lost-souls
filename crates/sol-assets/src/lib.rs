@@ -1,4 +1,4 @@
-//! `sol-assets` — the shared asset contract for Sea of Lost Souls.
+//! `sol-assets` - the shared asset contract for Sea of Lost Souls.
 //!
 //! These `serde` types mirror the authoring `ship.json` schema (see
 //! `design.md` §15) and are the contract shared by `sol-shipc` (the compiler /

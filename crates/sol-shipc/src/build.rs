@@ -128,7 +128,7 @@ fn validate_glb_nodes(def: &ShipDef, glb_nodes: &HashSet<String>) -> anyhow::Res
 ///
 /// Conduits are undirected for connectivity purposes (power can be traced
 /// either way through the bus). Node ids in this graph are logical power ids
-/// (reactor node id, subsystem ids, `bus_main`) — NOT GLB nodes.
+/// (reactor node id, subsystem ids, `bus_main`) - NOT GLB nodes.
 fn validate_power_graph(def: &ShipDef) -> anyhow::Result<()> {
     let grid = &def.power_grid;
 
