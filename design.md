@@ -683,6 +683,9 @@ touch UX**: keep it minimal but always functional.
   logic.
 - The move-disk altitude gesture stays desktop-only for now; mobile substitutes
   a simple altitude control.
+- On-device debugging uses **eruda** (a mobile DevTools console) injected in the
+  game's `index.html`; it loads only on touch devices, or on any device when the
+  URL carries `?eruda`.
 - **Rule:** never ship a gameplay feature that can only be tested on desktop.
 
 ---
