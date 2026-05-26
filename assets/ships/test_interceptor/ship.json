@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "id": "test_interceptor",
+  "name": "Test Interceptor",
+  "faction": "player",
+  "class": "strike",
+  "model": "model.glb",
+  "mass": 60,
+  "crew": { "min": 1, "optimal": 1 },
+  "hull": { "sections": ["fore", "aft"], "integrity": 80 },
+  "colliders": [ { "type": "convexHull", "node": "hull" } ],
+  "shields": { "facings": 4, "capacity": 40, "regen": 4 },
+  "powerGrid": {
+    "reactor": { "node": "reactor_core", "output": 20 },
+    "capacitors": [ { "node": "cap_main", "capacity": 15 } ],
+    "conduits": [
+      { "from": "reactor_core", "to": "bus_main", "capacity": 20 },
+      { "from": "bus_main", "to": "engines", "capacity": 10 },
+      { "from": "bus_main", "to": "shields", "capacity": 8 },
+      { "from": "bus_main", "to": "sensors", "capacity": 4 }
+    ],
+    "subsystems": [
+      { "id": "engines", "node": "engine_mount", "draw": 8, "priority": 2 },
+      { "id": "shields", "node": "shield_emitter", "draw": 5, "priority": 3 },
+      { "id": "sensors", "node": "sensor_array", "draw": 2, "priority": 1 }
+    ]
+  },
+  "hardpoints": [
+    { "id": "nose_gun", "node": "hp_nose", "mount": "fixed", "weapon": "pulse_cannon", "arcDeg": 10, "drawPerShot": 4 }
+  ]
+}

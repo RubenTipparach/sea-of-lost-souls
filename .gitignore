@@ -1,0 +1,19 @@
+# Rust
+/target
+**/target
+
+# Compiled game assets — produced by sol-shipc in CI, never committed
+/assets/compiled/
+
+# Web build outputs
+/crates/sol-app/dist
+/site_build
+editor/node_modules/
+editor/dist/
+
+# Logs / OS / editor cruft
+*.log
+.DS_Store
+.idea/
+.vscode/
+*.swp
