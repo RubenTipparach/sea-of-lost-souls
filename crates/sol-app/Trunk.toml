@@ -5,6 +5,10 @@
 [build]
 target = "index.html"
 dist = "dist"
+# Relative asset URLs so the bundle loads under any path on GitHub Pages: the
+# project-site root (/sea-of-lost-souls/) and per-branch /branch/<slug>/
+# previews. Absolute "/" paths would 404 on a project page. See design.md §17.
+public_url = "./"
 
 [serve]
 # Local dev server (`trunk serve`).
