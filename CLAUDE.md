@@ -116,6 +116,11 @@ cargo test --workspace
   official GitHub Actions Pages flow, intentionally with **no main-branch gate**
   (see `design.md` §17). A single live site is served at the project root; the
   most recent push wins. Pages source must be set to "GitHub Actions".
+- **After each change, print the live URLs.** When you finish a change (and
+  especially after pushing), output both of these so the deploy and CI are easy
+  to track:
+  - **GitHub Pages (live site):** https://rubentipparach.github.io/sea-of-lost-souls/
+  - **GitHub Actions (CI runs):** https://github.com/RubenTipparach/sea-of-lost-souls/actions
 - Tests/lint run for signal but **must not block the deploy** (per the brief).
   Still, **keep `fmt`/`clippy`/`test` green** - don't land obviously broken code.
 - `sol-shipc` runs in CI before the wasm build; invalid ship assets fail that
