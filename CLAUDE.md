@@ -7,6 +7,13 @@ campaign, built in **Rust + wgpu**, targeting the **web browser first** and
 desktop second. The full blueprint is in [`design.md`](./design.md) - read it
 before making non-trivial changes.
 
+> **`design.md` is the single source of truth.** Any core gameplay design
+> change or technical/architectural change MUST be captured in `design.md` as
+> part of the same change that introduces it: keep its prose in sync with the
+> code and the `ship.json` schema. Working notes elsewhere (e.g. `plan-*.md`)
+> are scratch; once a decision sticks, fold it into `design.md` so the blueprint
+> never lags behind the build.
+
 ---
 
 ## ⚠️ Hard rule: asset generation (static vs. procedural)

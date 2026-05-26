@@ -200,6 +200,23 @@ Crew are the **rarest resource** and a first-class simulated entity per ship:
   Doctrine*). Proficiency with a ship's tech determines how much of its
   potential you can unlock.
 
+**Crew are a logistics roster, split into two categories:**
+
+- **Ship operations** crew run reactors, subsystems, and damage control; the
+  proficiency model above applies to them.
+- **Pilots** fly strike craft (fighters, bombers). Pilots gain **experience**
+  and improve over a campaign; when killed they are replaced only slowly, either
+  by recruiting with **prestige** earned through noble deeds, or by
+  **retraining** operations crew into pilots (cheaper, but sloppier and less
+  effective).
+
+Crew are **allocated, not spent**. There is rarely enough to fully staff every
+hull, so the player constantly triages: pulling crew off one ship to operate
+another **degrades** the donor's system efficiency, repair rate, and overall
+performance. Between missions, **low morale** can make crews leave entirely.
+Because crew are earned mainly through prestige (noble deeds across the
+campaign), they are the tightest constraint in the fleet economy.
+
 ### Capturing a ship
 
 ```mermaid
@@ -649,8 +666,24 @@ Supporting order tools (Homeworld defaults shown):
 | Power preset | `1`-`4` on hotbar | Per-selection allocation |
 
 > Bindings are data-driven and fully rebindable; defaults mirror Homeworld
-> Remastered where applicable. Touch/controller are out of scope for the slice,
-> but the input layer must not hard-code mouse assumptions.
+> Remastered where applicable. Controllers are out of scope for the slice, but
+> the input layer must not hard-code mouse assumptions, and **touch is a required
+> test harness** (see [§9.6](#96-mobile-test-harness-input-parity)).
+
+### 9.6 Mobile test harness (input parity)
+
+The target experience is desktop (mouse + keyboard), but **every gameplay
+feature must also be exercisable in a phone/tablet browser**, because mobile
+testing massively shortens iteration. Mobile is a **test harness, not a polished
+touch UX**: keep it minimal but always functional.
+
+- A lightweight **DOM control overlay** (HTML buttons/menus outside the wgpu
+  canvas) plus basic **touch input** (tap to select/move) drive the *same*
+  wasm-exported commands as the desktop path; there is no parallel gameplay
+  logic.
+- The move-disk altitude gesture stays desktop-only for now; mobile substitutes
+  a simple altitude control.
+- **Rule:** never ship a gameplay feature that can only be tested on desktop.
 
 ---
 
