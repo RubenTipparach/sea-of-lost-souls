@@ -1,0 +1,65 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sol-sim",
+    "crates/sol-render",
+    "crates/sol-app",
+    "crates/sol-assets",
+    "crates/sol-shipc",
+    "crates/sol-net",
+    "crates/sol-procgen",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/santipab/sea-of-lost-souls"
+
+# Shared dependency versions live here so the whole workspace stays consistent.
+# (Populated/curated below; individual crates reference these with
+# `dep.workspace = true`.) The graphics stack version is dictated by what
+# compiles together as a unit — see crates/sol-render and crates/sol-app.
+[workspace.dependencies]
+# Math + POD helpers (shared everywhere).
+glam = { version = "0.33", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
+
+# Serialization: JSON for authoring, bincode (v1, simple API) for compiled data.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+
+# Error handling.
+anyhow = "1"
+thiserror = "2"
+
+# glTF / GLB authoring + loading. `names` lets us author node names (the
+# hardpoint/subsystem anchors the pipeline validates); `extras` keeps per-object
+# extras available for future authoring metadata.
+gltf = "1"
+gltf-json = { version = "1", features = ["names", "extras"] }
+
+# Graphics + windowing stack. CRITICAL: these versions are mutually
+# consistent — egui-wgpu 0.34 depends on `wgpu ^29` and `winit ^0.30`, so the
+# whole stack is pinned around wgpu 29 (egui dictates, per the build brief).
+wgpu = "29"
+winit = "0.30"
+egui = "0.34"
+egui-wgpu = "0.34"
+egui-winit = { version = "0.34", default-features = false }
+pollster = "0.4"
+raw-window-handle = "0.6"
+
+log = "0.4"
+env_logger = "0.11"
+
+# wasm-only deps (referenced by sol-app under a cfg(target_arch) table).
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = "0.3"
+console_error_panic_hook = "0.1"
+console_log = "1"
+
+[profile.release]
+opt-level = 3

@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sea of Lost Souls</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: #04050a;
+        overflow: hidden;
+      }
+      /* winit appends its <canvas> to <body>; make it fill the viewport. */
+      canvas {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+        outline: none;
+      }
+      #loading {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #6f7a8a;
+        font-family: system-ui, sans-serif;
+        pointer-events: none;
+      }
+    </style>
+    <!-- Trunk injects the wasm-bindgen bootstrap that calls the `start` entry. -->
+    <link data-trunk rel="rust" data-wasm-opt="z" data-bin="sol-app" />
+  </head>
+  <body>
+    <div id="loading">Initializing fleet intelligence&hellip;</div>
+  </body>
+</html>

@@ -1,0 +1,87 @@
+name: build-and-deploy
+
+# Continuous delivery, no gates: every commit on every branch builds the wasm
+# game + the web ship editor and deploys them to GitHub Pages. The default
+# branch publishes to the site root; every other branch publishes to a
+# branch/<slug>/ preview. See design.md §17.
+on:
+  push:
+    branches: ["**"]
+
+permissions:
+  contents: write          # to publish to the gh-pages branch
+
+# Serialize deploys so parallel branch builds don't race on gh-pages.
+concurrency:
+  group: pages-deploy
+  cancel-in-progress: false
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable + wasm target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install trunk
+        uses: jetli/trunk-action@v0.5.0
+        with:
+          version: latest
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # 1) Compile + validate ship assets (fails the build on bad ships).
+      - name: Compile ship assets
+        run: cargo run -p sol-shipc -- build assets/ships --out assets/compiled
+
+      # 2) Build the wasm game (output: crates/sol-app/dist).
+      - name: Build game (wasm)
+        working-directory: crates/sol-app
+        run: trunk build --release
+
+      # 3) Build the web ship editor (output: editor/dist).
+      - name: Build ship editor
+        working-directory: editor
+        run: |
+          npm ci
+          npm run build
+
+      # 4) Assemble the site: game at root, editor under /editor.
+      - name: Assemble site
+        run: |
+          mkdir -p site_build
+          cp -r crates/sol-app/dist/. site_build/
+          mkdir -p site_build/editor
+          cp -r editor/dist/. site_build/editor/
+          # If/when wasm threads are enabled, drop coi-serviceworker.js here and
+          # reference it from index.html so SharedArrayBuffer works on Pages
+          # (GitHub Pages cannot set COOP/COEP headers). See design.md §17.
+
+      # 5) Default branch -> site root; other branches -> branch/<slug> preview.
+      - name: Compute publish directory
+        id: dest
+        run: |
+          if [ "${GITHUB_REF_NAME}" = "${{ github.event.repository.default_branch }}" ]; then
+            echo "dir=." >> "$GITHUB_OUTPUT"
+          else
+            slug="$(echo "${GITHUB_REF_NAME}" | tr '/_' '--')"
+            echo "dir=branch/${slug}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site_build
+          destination_dir: ${{ steps.dest.outputs.dir }}
+          keep_files: true       # preserve other branches' previews

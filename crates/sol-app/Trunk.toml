@@ -1,0 +1,12 @@
+# Trunk config for the web build of sol-app.
+# CI builds with `cd crates/sol-app && trunk build --release`; the bundle lands
+# in `crates/sol-app/dist`.
+
+[build]
+target = "index.html"
+dist = "dist"
+
+[serve]
+# Local dev server (`trunk serve`).
+address = "127.0.0.1"
+port = 8080
