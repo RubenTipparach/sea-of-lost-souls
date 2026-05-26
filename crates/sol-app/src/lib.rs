@@ -134,8 +134,10 @@ impl App {
         let slot: PendingGraphics = std::rc::Rc::new(std::cell::RefCell::new(None));
         self.pending = Some(std::rc::Rc::clone(&slot));
 
-        let size = window.inner_size();
-        let (w, h) = (size.width.max(1), size.height.max(1));
+        let (w, h) = web_drawable_size().unwrap_or_else(|| {
+            let s = window.inner_size();
+            (s.width.max(1), s.height.max(1))
+        });
         wasm_bindgen_futures::spawn_local(async move {
             match Renderer::new(Arc::clone(&window), w, h).await {
                 Ok(renderer) => {
@@ -143,7 +145,10 @@ impl App {
                     *slot.borrow_mut() = Some(Graphics { renderer, mesh });
                     window.request_redraw();
                 }
-                Err(e) => log::error!("failed to create renderer: {e:#}"),
+                Err(e) => {
+                    log::error!("failed to create renderer: {e:#}");
+                    show_overlay_error(&format!("Renderer init failed: {e}"));
+                }
             }
         });
     }
@@ -155,6 +160,7 @@ impl App {
             if let Some(slot) = &self.pending {
                 if let Some(g) = slot.borrow_mut().take() {
                     self.graphics = Some(g);
+                    hide_loading_overlay();
                 }
             }
         }
@@ -294,6 +300,43 @@ fn placeholder_ship_mesh() -> CpuMesh {
 }
 
 // --- wasm entry point ------------------------------------------------------
+
+/// Physical (device-pixel) drawable size taken from the browser viewport. More
+/// reliable than winit's initial `inner_size()` on web, which can report 0
+/// before the canvas is laid out (notably on mobile), leaving a 1x1 surface
+/// that gets stretched to a flat color across the screen.
+#[cfg(target_arch = "wasm32")]
+fn web_drawable_size() -> Option<(u32, u32)> {
+    let win = web_sys::window()?;
+    let dpr = win.device_pixel_ratio();
+    let w = win.inner_width().ok()?.as_f64()?;
+    let h = win.inner_height().ok()?.as_f64()?;
+    let pw = ((w * dpr).round() as u32).max(1);
+    let ph = ((h * dpr).round() as u32).max(1);
+    Some((pw, ph))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn loading_overlay() -> Option<web_sys::Element> {
+    web_sys::window()?.document()?.get_element_by_id("loading")
+}
+
+/// Remove the HTML "Initializing..." overlay once the renderer is live.
+#[cfg(target_arch = "wasm32")]
+fn hide_loading_overlay() {
+    if let Some(el) = loading_overlay() {
+        el.remove();
+    }
+}
+
+/// Surface a fatal init error in the overlay so it is visible on devices
+/// without dev tools (e.g. phones).
+#[cfg(target_arch = "wasm32")]
+fn show_overlay_error(msg: &str) {
+    if let Some(el) = loading_overlay() {
+        el.set_text_content(Some(msg));
+    }
+}
 
 /// wasm entry point. Trunk calls this on load. Sets up panic/log hooks, appends
 /// a canvas to the document body, and starts the app.
