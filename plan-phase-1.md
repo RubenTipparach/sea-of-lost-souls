@@ -72,7 +72,9 @@ fire in Phase 1. IDs are snake_case to match `test_interceptor`.
 | `capital_destroyer` | Capital | Heavy hitter | 16000 | 28 | 10 | 900 / 60 / 110 | wide turns |
 | `carrier` | Ark / mothership | Command + production | 40000 | 18 | 6 | prebuilt (not buildable) | `production.bays` 2; loss = game over |
 
-All numbers are **initial intent** and get tuned in Stage 10.
+All numbers are **initial intent** and get tuned in Stage 10. The crew figure is
+the headcount a ship needs to operate (allocated from the roster, not spent):
+`fighter` and `bomber` draw **Pilots**, every other class draws **Ops**.
 
 ---
 
@@ -83,13 +85,37 @@ These fields are added once, in Stage 1, and kept in sync across
 validator. `schemaVersion` goes `1 -> 2`; `test_interceptor` is migrated.
 
 - `mobility: { maxSpeed, accel, turnRateDeg }` - required; drives steering.
-- `build: { salvage, crew, time }` - required; cost and seconds to produce.
+- `build: { salvage, time }` - required; salvage cost and seconds to produce.
 - `cargo: { capacity }` - optional; salvage units a collector can carry.
 - `production: { bays }` - optional; concurrent build bays (carrier).
+
+The crew a ship needs is the existing `crew.min`; its **category** (ops vs
+pilots) is derived from class (strike craft need pilots, everything else needs
+ops). Building allocates that crew from the team roster rather than spending it.
 
 Validation (in `sol-shipc`): `maxSpeed/accel/turnRateDeg > 0`, build costs and
 times non-negative and finite, optional blocks well-formed. Floats are `f32`
 (same ops native and wasm) for determinism.
+
+---
+
+## Crew as logistics (target design vs Phase 1 scope)
+
+**Target design** (build toward, mostly M2/M4): crew are the rarest resource,
+earned through noble deeds (prestige) across the campaign, and act as a logistics
+system. They split into **ship operations** and **pilots**. Pilots gain XP and
+improve; if killed they are replaced slowly via prestige or by retraining ops
+into pilots (less effective). Too few crew forces you to pull crew off other
+ships, degrading their system efficiency, repair rate, and performance. Low
+morale can make crews leave between missions.
+
+**Phase 1 scope** (the foundation only): a team **roster** with two pools, `Ops`
+and `Pilots`, each tracking free vs allocated headcount. A ship needs `crew.min`
+of its category to operate; **building allocates** that crew from the free pool
+and **blocks** if the pool is short (with a clear HUD message). Deferred to later
+milestones: prestige rewards, pilot XP and casualties, retraining, morale-driven
+departures, and the reallocation-degradation model (which depends on the
+subsystem/power sim in M2).
 
 ---
 
@@ -120,7 +146,9 @@ times non-negative and finite, optional blocks well-formed. Floats are `f32`
         blueprint ref). Keep `prev_transform` for render interpolation.
   - [ ] `ShipRegistry`: load compiled blueprints (static stats) keyed by id.
   - [ ] `Command` enum (`MoveTo`, `Stop`, `Harvest`, `Build`, `SetRally`, ...) and
-        a per-tick command queue applied at step boundaries.
+        a per-tick command queue applied at step boundaries, exposed through
+        wasm-callable entry points so desktop input and the mobile DOM panel issue
+        the *same* commands.
   - [ ] Fixed-timestep accumulator (30 Hz) in `sol-app`; render interpolates
         between `prev` and `curr`.
 - Touches: `crates/sol-sim/src/lib.rs` (+ new modules), `crates/sol-app/src/lib.rs`.
@@ -232,16 +260,18 @@ times non-negative and finite, optional blocks well-formed. Floats are `f32`
 - Goal: spend salvage and crew to build new ships at the carrier.
 - Tasks:
   - [ ] Carrier production queue with `production.bays` concurrency.
-  - [ ] `Build` command: if the team has enough `Salvage` + `Crew`, enqueue;
-        progress over `build.time`; on completion spawn near the carrier and
-        join the fleet.
-  - [ ] Team `Crew` pool as a second resource consumed by building.
+  - [ ] `Build` command: if the team has enough `Salvage` and free crew of the
+        ship's category, enqueue and allocate the crew; progress over
+        `build.time`; on completion spawn near the carrier and join the fleet.
+  - [ ] Team crew **roster** (`Ops` + `Pilots`, free vs allocated); building
+        blocks when the needed pool is short.
   - [ ] Build HUD: buildable classes with costs, queue display, resource readout.
 - Touches: `crates/sol-sim` (production module), `crates/sol-app` + egui build menu.
 - Notes: the design's "building lowers defenses / diverts power" trade-off is
   deferred; Phase 1 uses cost + time + queue only.
-- DoD: select the carrier, build a fighter, see Salvage and Crew decrement, the
-  timer run, and the new ship appear and be selectable.
+- DoD: select the carrier, build a fighter, see Salvage drop and a Pilot get
+  allocated from the roster, the timer run, and the new ship appear and be
+  selectable (on desktop and from the mobile panel).
 
 ---
 
@@ -262,21 +292,35 @@ times non-negative and finite, optional blocks well-formed. Floats are `f32`
 
 ---
 
-## Open decisions to confirm
+## Resolved decisions
 
-1. **ECS approach.** Recommend extending the hand-rolled deterministic store
-   (stable order, explicit ids) for Phase 1 and deferring `bevy_ecs` until combat
-   needs it, because default query iteration order is not guaranteed stable for
-   lockstep. Alternative: adopt `bevy_ecs` now with careful ordered iteration.
-2. **Web asset delivery.** Recommend `include_bytes!` for the handful of compiled
-   placeholder GLBs (identical native/wasm, no fetch layer). Alternative: an async
-   fetch-based asset registry now.
-3. **Resource model.** Two resources (Salvage + Crew) as the design implies, with
-   a single shared team stockpile. Confirm whether Crew should be a soft cap
-   (population) vs a spent currency in Phase 1.
-4. **Ship authoring for the suite.** Recommend the offline `sol-shipc gen`
-   placeholder hulls now; the editor authors real art later. Confirm if you would
-   rather author all 8 in the editor up front.
+1. **Sim core: hand-rolled deterministic store.** Extend the Vec-based world with
+   stable EntityIds and typed component storage; explicit ordering keeps lockstep
+   determinism simple. `bevy_ecs` is deferred until combat/despawn needs it.
+2. **Web asset delivery: embed.** Compiled placeholder GLBs are embedded with
+   `include_bytes!` so native and wasm load identically; no fetch layer yet.
+3. **Crew: a logistics roster, not a currency.** See the Crew as logistics
+   section.
+4. **Ship authoring: offline gen now.** Author the 8 placeholder hulls with an
+   extended `sol-shipc gen` (committed static assets); the editor authors real art
+   later.
+5. **Mobile: a minimal DOM test panel.** HTML buttons/menus plus tap input drive
+   the same commands as desktop. See the Mobile test harness section.
+
+## Mobile test harness (cross-cutting)
+
+Per the CLAUDE.md rule, every system below must be operable on a phone, so the
+harness is built incrementally alongside Stages 6-9, not bolted on at the end.
+
+- A DOM control overlay in `crates/sol-app/index.html`: HTML buttons/menus
+  (select all, cycle selection, move-to-tap, stop, build <class>, focus carrier)
+  positioned outside the wgpu canvas.
+- Buttons call the wasm-exported command entry points from Stage 2, so they share
+  one code path with desktop input (no parallel game logic).
+- Touch input on the canvas: tap to select, tap to move (the move-disc altitude
+  gesture stays desktop-only for now; mobile uses a simple altitude slider).
+- Definition of done for each system: it can be exercised end to end from a phone
+  browser using only the DOM panel and taps.
 
 ## Sequencing notes
 
