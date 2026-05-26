@@ -332,6 +332,129 @@ inside the hull) authored in the [ship editor](#16-web-based-ship-editor).
 - Fog of war is the player's *actual* knowledge — consistent with the
   [camera-as-character](#the-camera-as-character-conceit) conceit.
 
+### 6.6 Flight & movement model
+
+Homeworld ships are **not** free-floating Newtonian bodies and **not**
+rigid-body physics props — they fly with an *arcade* model: a top speed, finite
+acceleration, a turn rate, and banking into turns. They arrive and stop; they
+don't drift forever. We adopt the same, scaled by **mass class**:
+
+- **State:** position, orientation (quaternion), linear & angular velocity.
+- **Steering:** an *arrive* behavior toward the order target (decelerate into
+  the point), constrained by per-class max speed / acceleration / turn-rate.
+  Strike craft are nimble; capital ships are sluggish and wide-turning.
+- **Formation flocking:** formation slots define desired offsets; ships seek
+  their slot with separation so they hold shape without jostling.
+- **Banking & roll** are *visual* (render-only) flourishes on the deterministic
+  motion; they never feed back into the sim.
+
+Movement integration runs in `sol-sim` at the **fixed timestep**
+(deterministic); the renderer interpolates between ticks for smoothness.
+
+### 6.7 Collision model (and the Homeworld lineage)
+
+Observably, Homeworld ships **mostly avoid** each other and only
+**occasionally collide** — and when they do, they don't ricochet like billiard
+balls. Across the series the behavior matured from HW1's looser
+avoidance/overlap (capital ships could foul each other, and ramming dealt
+damage) to HW2's tighter formation-flying and avoidance. We want that *feel*:
+graceful avoidance first, gentle (and damaging) contact second — never bouncy
+rigid-body chaos.
+
+Our approach is **avoidance-first kinematic motion with soft contact response**:
+
+1. **Avoidance (primary):** a *separation* steering term keeps ships spaced;
+   local avoidance steers around obstacles (other hulls, asteroids) along the
+   path. Most "collisions" are prevented before they happen — this is what sells
+   the Homeworld look.
+2. **Broad phase:** a spatial structure (uniform grid or BVH, e.g. parry's
+   `Qbvh`) sized to the encounter finds candidate overlaps cheaply.
+3. **Narrow phase:** `parry3d` shape queries against the authored convex
+   hulls/compounds ([§6.3](#63-structure-hitboxes--positional-damage)) produce
+   contacts.
+4. **Soft response (no restitution):** on real contact we apply a **gentle
+   separation impulse + velocity damping**, scaled by **mass** — fighters get
+   shoved aside, capital ships barely budge, and nothing bounces. Relative
+   momentum at impact deals **ram damage** (and can be a deliberate tactic).
+5. **Continuous collision detection (CCD):** fast ships (and all projectiles)
+   are swept along their path each tick so they can't tunnel through thin hulls
+   — essential for both fairness and determinism.
+
+> **Library choice: `parry3d`, not `rapier3d`.** We want collision *queries* and
+> a custom kinematic response, not a dynamics solver. `rapier` (forces,
+> restitution, joints) would fight us by making things bounce and by adding
+> solver nondeterminism. `parry3d` gives us raycasts, shape-casts, contact
+> generation, convex decomposition, and the BVH — exactly what a space RTS needs
+> — while we own the motion and response rules. (Tumbling *wreckage/debris*, if
+> we add it, is a **render-only, non-deterministic** flourish that may use a
+> throwaway dynamics pass which never touches `sol-sim`.)
+
+### 6.8 Ballistics & projectiles
+
+Per the brief, **every bullet is physical but deterministic** — no abstract
+"dice-roll" hit chances on ballistic weapons.
+
+- **Projectiles are entities** in `sol-sim` with position + velocity, integrated
+  at the fixed timestep (semi-implicit Euler). They have travel time, can be
+  dodged, and can miss.
+- **Firing solution:** when a mount fires at a moving target it computes a
+  deterministic **lead/intercept** (solve for the interception point given
+  projectile speed and target velocity). Slow guns must lead fast ships; fast
+  ships can juke slow rounds — emergent, skill-expressive combat.
+- **Hit detection = swept query (CCD):** each tick, ray/shape-cast the
+  projectile's segment of travel against candidate colliders via `parry3d`. No
+  tunneling, frame-rate-independent, deterministic.
+- **Weapon archetypes:**
+  - *Kinetic / pulse* — discrete projectiles as above.
+  - *Beam* — an instantaneous ray (still a deterministic `parry3d` raycast);
+    continuous power draw.
+  - *Missile / torpedo* — a **guided** projectile: deterministic
+    pursuit/proportional-navigation steering toward the target, with fuel/turn
+    limits (so it can be outmaneuvered or flared).
+- **Impact resolution (deterministic, positional):** at the hit point we
+  resolve, in order — **shield facing** → **hull section** → **subsystem** (by
+  which internal collider the penetrating shot struck;
+  [§6.3](#63-structure-hitboxes--positional-damage)). This is what makes "shoot
+  their engines" real and ties weapons to the
+  [capture loop](#5-crew-capture--research).
+- **Gravity / fields:** projectile integration reads the deterministic
+  environmental fields ([§8](#8-reactive-environments)) — gravity wells curve
+  trajectories; magnetar/ion fields perturb or disrupt — all on the coarse CPU
+  sim so every peer agrees.
+
+### 6.9 Determinism in the physics sim (non-negotiable for multiplayer)
+
+[Lockstep multiplayer](#13-multiplayer-peer-to-peer) requires that movement,
+collision, and ballistics produce **bit-identical** results on every peer —
+including **wasm vs. native**. The physics layer is the hardest part of that
+promise, so we design for it from day one:
+
+- **Fixed timestep**, fixed integration scheme, no wall-clock anywhere in
+  `sol-sim`.
+- **Deterministic iteration order:** ships, contacts, and projectiles are
+  processed in a **canonical order** (stable entity ids / sorted contact keys),
+  so resolution never depends on hash-map or thread ordering.
+- **Controlled floating point:** no fast-math/FMA contraction surprises; route
+  transcendentals (intercept math, trig) through the **`libm`** crate so
+  `sin/cos/sqrt` match across platforms; prefer scalar paths over autovectorized
+  ones where results could differ.
+- **Fixed-point escape hatch:** if cross-platform `f32` proves too divergent for
+  the most sensitive quantities (positions/velocities), move *those* to
+  fixed-point while keeping the rest in float.
+- **Seeded RNG only:** any scatter/spread is drawn from the sim's deterministic
+  PRNG, never the OS.
+- **Desync detection:** the sim state (all bodies + projectiles) is
+  **checksummed every K ticks**; peers compare and halt+report on divergence
+  ([§13](#13-multiplayer-peer-to-peer)).
+- **Determinism test harness (build it early):** replay an identical command
+  stream on native and on wasm, compare per-tick checksums, and fail CI if they
+  drift. Catching divergence the day it is introduced is the only sane way to
+  keep lockstep alive.
+
+> This is *why* `parry3d` is used purely for queries and we own
+> integration/response: it keeps every floating-point operation that affects
+> gameplay inside `sol-sim`, where we can control it.
+
 ---
 
 ## 7. The Procedural Universe
@@ -415,62 +538,119 @@ the **command camera** and **3D order issuing** (the move-disk), plus classic
 
 ### 9.1 The command camera (Homeworld "sensors sphere")
 
-- **Orbit:** the camera orbits a **focus point** (a selected ship, a squad
-  centroid, or a free point). Rotate yaw/pitch around it.
-- **Zoom:** dolly toward/away from the focus, from cinematic close-ups to a
-  near-strategic "sensors view" pulled way out.
-- **Pan / refocus:** double-click a ship or press *Focus* to re-anchor the
-  orbit on it; free-pan to move the focus point through space.
-- **Sensors view:** zooming far out transitions toward an abstracted tactical
-  representation (icons, vectors) — readable at fleet scale.
-- Smooth, momentum-eased, framerate-independent. The camera *is* the player, so
-  it must feel like an extension of intent.
+**How Homeworld actually does it (reference).** The camera is a *focus-orbit*
+camera — never a free-fly/FPS camera. Its state is `(focus point, distance,
+yaw, pitch)` with **world-up preserved** (the horizon never rolls) and pitch
+clamped. Everything orbits a focus:
+
+- **Focus** is re-anchored with `F` (focus on selection), `Home` (focus on the
+  Mothership/flagship), cycled with `Page Up`/`Page Down` (next/previous focus),
+  and `Num 0` (last combat event). Once focused, the camera *tracks* that target
+  as it moves.
+- **Orbit / tumble:** hold the **right mouse button and drag** to rotate around
+  the focus; hold **`Alt`** to lock onto and orbit a specific entity under the
+  cursor (the usual way you fly the view around a battle).
+- **Zoom & camera height:** the **mouse wheel** dollies in/out. Zooming fully
+  out opens the **Sensors Manager** — a flattened, abstracted tactical sphere of
+  the whole battlespace where you can still select and issue orders.
+- **Pan** the focus with the arrow keys (forward/back/left/right) and
+  `Insert`/`Delete` (up/down).
+
+> Exact bindings differ across Homeworld 1, 2, and Remastered and are all
+> rebindable; the *model* — focus-orbit, sensors view, focus cycling — is the
+> constant, and that is what we implement.
+
+**Our model** adopts this directly:
+
+- State = focus point + distance + yaw + pitch; world-up locked; pitch clamped
+  just shy of the poles to avoid gimbal flip.
+- Orbit (RMB-drag, `Alt` to re-lock), zoom (wheel), pan focus (keys/edge),
+  focus-on-selection (`F`), focus-on-Ark (`Home`), cycle focus.
+- Far zoom → **sensors view** (icons/vectors, readable at fleet scale; orders
+  still issuable).
+- Momentum-eased and framerate-independent — the camera *is* the player, so it
+  must feel like an extension of intent. The focus tracks moving selections.
 
 ### 9.2 Issuing 3D orders — the move-disk
 
-Moving in true 3D with a 2D mouse is the classic problem. We use the
-**Homeworld move-disk**:
+Moving in true 3D with a 2D mouse is *the* Homeworld problem, solved by the
+**movement disc**. The exact Homeworld flow:
 
-1. With ships selected, hold the **move** action: a horizontal **disk/plane**
-   appears at the selection's altitude, centered under the cursor.
-2. Move the mouse to choose the **X/Z** destination on the disk.
-3. Hold and drag **vertically** (or scroll) to raise/lower a **vertical guide
-   line**, setting the **Y** (altitude) component.
-4. Release to confirm. A clear gizmo shows the target point, the altitude line,
-   and a ghost of the destination formation.
+1. With ships selected, press **`M`** (Move) — a horizontal **disc** (the "blue
+   circle") appears, centered on the selection at its current altitude.
+2. **Move the mouse** to slide the destination across the disc — this sets the
+   **X/Z** position (and how far).
+3. To set **altitude (Y)**: **hold `Shift` and drag the mouse up/down** — a
+   vertical guide line lifts the destination above/below the disc plane.
+4. **Click** to confirm. Ships path to the 3D point, preserving formation.
 
-Supporting order tools:
-- **Formation & facing:** set facing/heading and formation shape on arrival.
-- **Attack-move, guard, patrol, dock, board, salvage, retreat.**
-- **Power presets:** quick allocation presets per selection (e.g., "engines
+A plain **right-click** also issues a context order — *move* to empty space,
+*attack* on an enemy — but the `M`-disc is the precise 3D tool. We implement
+both: RMB context-orders for speed, and the `M`-disc (`Shift`+vertical for
+altitude) for deliberate positioning, drawing a clear gizmo (disc, altitude
+pole, destination ghost, formation preview).
+
+Supporting order tools (Homeworld defaults shown):
+- **Attack-move** (`Ctrl+A`), **Waypoints** (`W`), **Stop** (`S`),
+  **Guard** (`G`), **Dock** (`D`), **Hyperspace/jump** (`J`).
+- **Formation & facing** on arrival; **formations** (Delta, Broad, Wall, X,
+  Claw, Sphere, …).
+- **Tactics stance:** *Evasive / Neutral / Aggressive* — changes how units
+  engage and reposition.
+- **Power presets** (our addition): per-selection energy allocation ("engines
   hot," "weapons free," "rig for silent running").
 
 ### 9.3 Selection
 
-- **Box (marquee) selection:** classic click-drag screen rectangle; selects all
-  friendly ships whose screen-space footprint intersects the box (with a
-  frustum test against hull colliders for correctness in 3D).
-- **Click / double-click:** single select / select-all-of-type-on-screen.
-- **Control groups:** bind/recall (e.g., `Ctrl+1` … `1`).
-- **Modifier add/remove:** shift to add, alt to subtract.
+- **Single select:** left-click a ship.
+- **Band-box (marquee):** left-click-drag a screen rectangle; selects friendlies
+  whose footprint intersects it (frustum test against hull colliders for 3D
+  correctness).
+- **Select all of type:** double-click a ship → all of that type on screen.
+- **Control / hotkey groups:** `Ctrl+1…9` to bind, `1…9` to recall (double-tap
+  to focus the group).
+- **Modifiers:** `Shift` add, `Alt`/`Ctrl` subtract (configurable).
+- **From the sensors view:** selection and orders work at fleet scale too.
 
-### 9.4 Input bindings (initial)
+### 9.4 Attack & combat orders
+
+- **Attack:** select, right-click an enemy (or the `Attack` command). Multiple
+  groups can **focus-fire** one target.
+- **Attack-move** (`Ctrl+A`): advance to a point, engaging anything hostile en
+  route.
+- **Guard / escort** a ship or volume; **patrol** via waypoints.
+- **Subsystem targeting (Homeworld 2):** against capital ships you can target
+  specific **subsystems** — engines, turrets, production, sensors. This maps
+  directly onto our
+  [positional-damage model](#63-structure-hitboxes--positional-damage): kill
+  engines to prevent escape, kill weapons to move in safely and **board**
+  ([§5](#5-crew-capture--research)).
+- **Capture order:** send boarding frigates at a sufficiently disabled target
+  ([§5](#5-crew-capture--research)).
+
+### 9.5 Input bindings (initial)
 
 | Action | Default | Notes |
 |---|---|---|
-| Orbit camera | RMB drag | Yaw/pitch around focus |
-| Zoom | Wheel | Toward focus; far = sensors view |
-| Pan focus | MMB drag / edge / WASD | Move focus point |
-| Focus on selection | `F` / double-click | Re-anchor orbit |
-| Select | LMB / LMB-drag | Click / marquee |
-| Move order (disk) | RMB (on empty space) + vertical drag | The move-disk |
-| Attack / context order | RMB on target | Context-sensitive |
+| Orbit camera | RMB drag (`Alt` = lock to entity) | Yaw/pitch around focus |
+| Zoom / camera height | Mouse wheel | Far out → sensors view |
+| Pan focus | Arrows / edge-scroll; `Ins`/`Del` up-down | Move focus point |
+| Focus on selection | `F` | Re-anchor + track |
+| Focus on Ark | `Home` | The mothership |
+| Cycle focus | `PgUp`/`PgDn`; `Num0` last event | |
+| Select / band-box | LMB / LMB-drag | Click / marquee |
+| Select all of type | Double-click | On-screen |
+| Move (disc) | `M`, then mouse; `Shift`+vertical = altitude | The 3D move tool |
+| Context order | RMB | Move on empty / attack on enemy |
+| Attack-move | `Ctrl+A` | |
+| Waypoints / Stop / Guard / Dock / Jump | `W` / `S` / `G` / `D` / `J` | |
 | Control group set/recall | `Ctrl+N` / `N` | |
+| Tactics stance | hotkey cycle | Evasive/Neutral/Aggressive |
 | Power preset | `1`–`4` on hotbar | Per-selection allocation |
 
-> Bindings are data-driven and rebindable; defaults above target mouse+keyboard.
-> Touch/controller are out of scope for the slice but the input layer should not
-> hard-code mouse assumptions.
+> Bindings are data-driven and fully rebindable; defaults mirror Homeworld
+> Remastered where applicable. Touch/controller are out of scope for the slice,
+> but the input layer must not hard-code mouse assumptions.
 
 ---
 
