@@ -1055,38 +1055,47 @@ no install.
 ## 17. Build & Deployment Pipeline
 
 **Continuous delivery, no gates.** Per the brief: **every commit on any branch
-builds and deploys to GitHub Pages.** There is **no main-branch gate** - the
-default branch is simply the canonical URL; every other branch gets a live
-preview.
+builds and deploys to GitHub Pages**, with **no main-branch gate**. We deploy
+via the official **GitHub Actions Pages** flow (Pages source = "GitHub
+Actions"), which serves a **single live site**: the most recent push wins. This
+mirrors the pattern used by the sibling `rts-engine-c` project. Pull requests
+build for verification but do not deploy.
 
 ### What gets built
 
-1. **Asset compile** - run `sol-shipc` over `assets/ships/**` → `assets/compiled/`.
-2. **Game (wasm)** - `trunk build --release` of `sol-app` (wgpu + egui),
-   producing the web bundle (wasm + JS glue + assets).
-3. **Ship editor** - `vite build` of `editor/` (Three.js/TS).
-4. **Assemble site** - game at the root, editor at `editor/`, deployed under a
-   **per-branch path**.
+1. **Asset compile:** `sol-shipc` over `assets/ships/**`, output to
+   `assets/compiled/`.
+2. **Game (wasm):** `trunk build --release` of `sol-app`, producing the web
+   bundle (wasm + JS glue + assets) in `crates/sol-app/dist`.
+3. **Ship editor:** `vite build` of `editor/` (Three.js/TS) to `editor/dist`.
+4. **Assemble + upload:** game at the site root, editor under `editor/`,
+   uploaded as a single Pages artifact.
 
 ### Deploy layout (GitHub Pages)
 
+The whole site is published at the project root and replaced on every push:
+
 ```
-<pages-root>/
-├── index.html                 ← default branch: the game
-├── editor/                     ← default branch: the ship editor
-└── branch/
-    └── <branch-slug>/
-        ├── index.html          ← that branch's game build
-        └── editor/             ← that branch's editor build
+https://<user>.github.io/<repo>/
+  index.html             the wasm game
+  sol-app-<hash>.js       wasm-bindgen glue + the wasm module
+  editor/                 the web ship editor
 ```
 
-- Default branch → site **root** (the canonical live build).
-- Any other branch → `branch/<slug>/` **preview** (so "build everything,
-  everywhere, every commit" holds without overwriting the canonical URL).
-- Implemented by publishing to a `gh-pages` branch with
-  `peaceiris/actions-gh-pages` using `destination_dir` (preserving other paths
-  with `keep_files`), guarded by a **concurrency group** so parallel branch
-  builds don't race.
+- **Single shared deployment.** Every push (any branch) rebuilds and replaces
+  the live site; the latest commit wins. This honors "build and deploy on every
+  commit, no gate" while keeping one canonical URL.
+- **Relative asset paths.** `trunk` uses `public_url = "./"` and the editor uses
+  Vite `base: "./"`, so the bundle loads correctly under the project-site path
+  `/<repo>/`.
+- **Official Actions flow.** A `build` job uploads the assembled site via
+  `actions/upload-pages-artifact`; a `deploy` job publishes it with
+  `actions/deploy-pages` to the `github-pages` environment.
+
+> Trade-off: the official Pages-Actions deploy publishes one artifact as the
+> whole site, so we do not keep separate `branch/<slug>/` preview URLs. If we
+> later want previews, branch-based serving (`peaceiris/actions-gh-pages` to a
+> `gh-pages` branch) is the alternative, at the cost of leaving "Actions" mode.
 
 ### Workflow sketch (`.github/workflows/deploy.yml`)
 
@@ -1094,11 +1103,17 @@ preview.
 name: build-and-deploy
 on:
   push:
-    branches: ["**"]          # every branch, every commit - no gates
+    branches: ["**"]        # every branch, every commit, no gates
+  pull_request:
+    branches: [main]        # PRs build (verify) but do not deploy
+  workflow_dispatch:
 permissions:
-  contents: write             # to push to gh-pages
+  contents: read
+  pages: write
+  id-token: write
 concurrency:
-  group: pages-deploy         # serialize deploys to avoid gh-pages races
+  group: pages              # single shared deploy; newest push wins
+  cancel-in-progress: true
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -1106,57 +1121,51 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with: { targets: wasm32-unknown-unknown }
-      - uses: jetli/trunk-action@v0
+      - uses: Swatinem/rust-cache@v2
+      - uses: jetli/trunk-action@v0.5.0
       - uses: actions/setup-node@v4
         with: { node-version: 20 }
-
-      # 1) compile ship assets (fails the build on bad ships)
       - run: cargo run -p sol-shipc -- build assets/ships --out assets/compiled
-
-      # 2) build the wasm game
-      - run: cd crates/sol-app && trunk build --release --dist ../../site_build/app
-
-      # 3) build the web ship editor
-      - run: cd editor && npm ci && npm run build -- --outDir ../site_build/editor
-
-      # 4) (web threading, if used) drop in coi-serviceworker for COOP/COEP
-      #    so SharedArrayBuffer works on GitHub Pages.
-
-      # 5) compute destination dir: default branch -> root, else branch/<slug>
-      - id: dest
-        run: |
-          if [ "${GITHUB_REF_NAME}" = "${{ github.event.repository.default_branch }}" ]; then
-            echo "dir=." >> "$GITHUB_OUTPUT"
-          else
-            slug=$(echo "${GITHUB_REF_NAME}" | tr '/' '-' )
-            echo "dir=branch/${slug}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./site_build
-          destination_dir: ${{ steps.dest.outputs.dir }}
-          keep_files: true     # don't wipe other branches' previews
+      - run: cd crates/sol-app && trunk build --release
+      - run: cd editor && npm ci && npm run build
+      - run: |
+          mkdir -p site_build/editor
+          cp -r crates/sol-app/dist/. site_build/
+          cp -r editor/dist/. site_build/editor/
+      - if: github.event_name == 'push'
+        uses: actions/upload-pages-artifact@v3
+        with: { path: site_build }
+  deploy:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
 ```
 
-### Caveats baked in
+### Setup & caveats
 
-- **WebGPU + threads:** if we enable wasm threads (rayon, threaded wgpu), the
-  browser requires **COOP/COEP** headers for `SharedArrayBuffer`. GitHub Pages
-  can't set headers, so we ship the **`coi-serviceworker`** shim. If we stay
-  single-threaded on web, this is unnecessary.
-- **WebGPU availability:** the app must **feature-detect** and show a friendly
-  message (with the WebGL2 fallback) on browsers without WebGPU.
+- **Pages source must be "GitHub Actions"** (Settings, Pages, Build and
+  deployment, Source: GitHub Actions). Nothing serves until this is set.
+- **Environment branch rules.** If a non-default branch is blocked ("Branch not
+  allowed to deploy to github-pages"), allow it under Settings, Environments,
+  `github-pages`, Deployment branches.
+- **WebGPU + threads:** enabling wasm threads needs **COOP/COEP** for
+  `SharedArrayBuffer`; GitHub Pages cannot set headers, so we would ship the
+  `coi-serviceworker` shim. Single-threaded web needs none of this.
+- **WebGPU availability:** feature-detect and show a friendly message (with the
+  WebGL2 fallback) on browsers without WebGPU.
 - **Cache busting:** `trunk` hashes wasm/asset filenames; compiled `.ship`
   assets are content-hashed by `sol-shipc`.
-- **Build speed:** cache `~/.cargo` and `target/` (e.g., `Swatinem/rust-cache`)
-  so every-commit builds stay fast.
+- **Build speed:** `Swatinem/rust-cache` keeps every-commit builds fast.
 
-> CI **builds and deploys** on every commit, intentionally without correctness
-> gates. We still run **tests/lint as a separate, non-blocking job** for signal
-> (and may make them blocking later if desired) - but they never stop a deploy,
-> per the brief.
+> CI builds and deploys on every commit, intentionally without correctness
+> gates. We may run tests/lint as a separate, non-blocking job for signal, but
+> they never stop a deploy, per the brief.
 
 ---
 

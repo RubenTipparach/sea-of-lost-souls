@@ -112,10 +112,10 @@ cargo test --workspace
 
 ## CI / deployment
 
-- **Every commit on every branch builds and deploys to GitHub Pages** -
-  intentionally **no main-branch gate** (see `design.md` §17). The default
-  branch is the canonical URL at the site root; other branches deploy to
-  `branch/<slug>/` previews.
+- **Every commit on every branch builds and deploys to GitHub Pages** via the
+  official GitHub Actions Pages flow, intentionally with **no main-branch gate**
+  (see `design.md` §17). A single live site is served at the project root; the
+  most recent push wins. Pages source must be set to "GitHub Actions".
 - Tests/lint run for signal but **must not block the deploy** (per the brief).
   Still, **keep `fmt`/`clippy`/`test` green** - don't land obviously broken code.
 - `sol-shipc` runs in CI before the wasm build; invalid ship assets fail that
