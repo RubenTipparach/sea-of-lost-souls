@@ -1968,6 +1968,7 @@ fn wire_dom_controls() {
         ("sol-clear", UiCmd::Clear),
         ("sol-formation", UiCmd::CycleFormation),
         ("sol-pause", UiCmd::TogglePause),
+        ("sol-bo-pause", UiCmd::TogglePause),
     ] {
         if let Some(el) = doc.get_element_by_id(id) {
             let cb = Closure::<dyn FnMut()>::new(move || push_ui(cmd));
@@ -2066,8 +2067,11 @@ fn set_pause_ui(paused: bool) {
             let _ = el.set_attribute("hidden", "");
         }
     }
-    if let Some(el) = doc.get_element_by_id("sol-pause") {
-        el.set_text_content(Some(if paused { "Resume" } else { "Pause" }));
+    let label = if paused { "Resume" } else { "Pause" };
+    for id in ["sol-pause", "sol-bo-pause"] {
+        if let Some(el) = doc.get_element_by_id(id) {
+            el.set_text_content(Some(label));
+        }
     }
 }
 
