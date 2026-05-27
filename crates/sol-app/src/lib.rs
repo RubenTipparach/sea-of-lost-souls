@@ -64,6 +64,13 @@ const MAX_DISTANCE: f32 = 80.0;
 /// Pitch clamp to avoid gimbal flip at the poles.
 const PITCH_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.05;
 
+/// Build-overlay turntable: default pitch, auto-spin rate (rad/s), and the idle
+/// delay (s) after a manual drag before the spin resumes and the pitch eases
+/// back to `PREVIEW_PITCH`.
+const PREVIEW_PITCH: f32 = 0.32;
+const PREVIEW_SPIN: f32 = 0.5;
+const PREVIEW_RETURN_DELAY: f32 = 2.0;
+
 /// Held pan/elevation keys (WASD + arrows pan the focus; Q/E change altitude).
 /// Read every frame so panning is smooth and framerate-independent.
 #[derive(Default)]
@@ -230,6 +237,17 @@ struct App {
     build_open: bool,
     /// Ship class currently previewed in the build overlay.
     build_preview: ShipClass,
+    /// Build-overlay turntable orientation. Auto-spins, but a drag on the ship
+    /// takes over (`preview_dragging`); `preview_idle` counts seconds since the
+    /// last drag so the spin can resume after a short pause.
+    preview_yaw: f32,
+    preview_pitch: f32,
+    preview_dragging: bool,
+    preview_idle: f32,
+    /// Camera lock-on target: while set, the camera focus follows this ship each
+    /// frame (orbit/zoom still work). Cleared the moment the player pans. UI
+    /// state only; never enters the sim.
+    focus_target: Option<EntityId>,
     /// Single-player pause: when set, the fixed-step sim is not advanced (the
     /// camera and UI still work). App-side only; a lockstep-synced pause is a
     /// future multiplayer concern.
@@ -281,6 +299,11 @@ impl App {
             formation: Formation::Parade,
             build_open: false,
             build_preview: ShipClass::Fighter,
+            preview_yaw: 0.0,
+            preview_pitch: PREVIEW_PITCH,
+            preview_dragging: false,
+            preview_idle: PREVIEW_RETURN_DELAY,
+            focus_target: None,
             paused: false,
             select_box: None,
             box_select_armed: false,
@@ -435,11 +458,29 @@ impl App {
         // stats). The sim keeps running underneath so the economy stays live.
         if self.build_open {
             let class = self.build_preview;
+            // Turntable: auto-spin by default, but a pointer drag on the empty
+            // centre of the overlay rotates the ship by hand; after a short idle
+            // the spin resumes and the pitch eases back to the default pose.
+            let (dx, dy, dragging) = read_preview_drag();
+            self.preview_dragging = dragging;
+            if dragging {
+                self.preview_yaw -= dx * 0.01;
+                self.preview_pitch =
+                    (self.preview_pitch + dy * 0.01).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+                self.preview_idle = 0.0;
+            } else {
+                self.preview_idle += frame_dt;
+                if self.preview_idle >= PREVIEW_RETURN_DELAY {
+                    self.preview_yaw += PREVIEW_SPIN * frame_dt;
+                    let k = (frame_dt * 4.0).min(1.0); // exp-ish ease back to pose
+                    self.preview_pitch += (PREVIEW_PITCH - self.preview_pitch) * k;
+                }
+            }
             let radius = self.world.registry.get(class).radius;
             let cam = OrbitCamera {
                 focus: Vec3::ZERO,
-                pitch: 0.32,
-                yaw: self.elapsed * 0.5,
+                pitch: self.preview_pitch,
+                yaw: self.preview_yaw,
                 distance: radius * 3.5 + 6.0,
                 ..OrbitCamera::default()
             };
@@ -472,6 +513,22 @@ impl App {
                 window.request_redraw();
             }
             return;
+        }
+
+        // Camera lock-on: while a target is set, the focus follows the ship's
+        // interpolated position (orbit/zoom still work). A pan clears the lock in
+        // `apply_camera_pan`; a destroyed target clears it here.
+        if let Some(tid) = self.focus_target {
+            match self.world.entity(tid) {
+                Some(e) => {
+                    self.camera.focus = e.prev_transform.pos.lerp(e.transform.pos, alpha);
+                }
+                None => {
+                    self.focus_target = None;
+                    #[cfg(target_arch = "wasm32")]
+                    set_focus_ui(false);
+                }
+            }
         }
 
         // Window drawable size, for projecting world points to the HUD overlay.
@@ -792,6 +849,43 @@ fn read_pan_input() -> (f32, f32, f32) {
     (0.0, 0.0, 0.0)
 }
 
+/// Build-overlay turntable drag from JS: accumulated pointer delta since the
+/// last frame and whether a drag is in progress. The deltas are reset to zero on
+/// read so each frame consumes only its own movement. Zero on native.
+#[cfg(target_arch = "wasm32")]
+fn read_preview_drag() -> (f32, f32, bool) {
+    use wasm_bindgen::JsValue;
+    let Some(win) = web_sys::window() else {
+        return (0.0, 0.0, false);
+    };
+    let target: JsValue = win.into();
+    let read = |name: &str| -> f32 {
+        js_sys::Reflect::get(&target, &JsValue::from_str(name))
+            .ok()
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0) as f32
+    };
+    let (dx, dy) = (read("__solPrevDX"), read("__solPrevDY"));
+    let dragging = read("__solPrevDrag") != 0.0;
+    // Consume the deltas so the next frame starts fresh.
+    let _ = js_sys::Reflect::set(
+        &target,
+        &JsValue::from_str("__solPrevDX"),
+        &JsValue::from_f64(0.0),
+    );
+    let _ = js_sys::Reflect::set(
+        &target,
+        &JsValue::from_str("__solPrevDY"),
+        &JsValue::from_f64(0.0),
+    );
+    (dx, dy, dragging)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_preview_drag() -> (f32, f32, bool) {
+    (0.0, 0.0, false)
+}
+
 // --- gizmo / HUD overlay geometry -----------------------------------------
 
 /// World-space line segment (two `BgVertex`, drawn with the line pipeline).
@@ -1014,6 +1108,12 @@ impl App {
 
         if rx.abs() + fy.abs() + elev.abs() < 1e-4 {
             return;
+        }
+        // Panning by hand breaks any camera lock-on (the focus is being moved).
+        if self.focus_target.is_some() {
+            self.focus_target = None;
+            #[cfg(target_arch = "wasm32")]
+            set_focus_ui(false);
         }
         rx = rx.clamp(-1.0, 1.0);
         fy = fy.clamp(-1.0, 1.0);
@@ -1275,6 +1375,43 @@ impl App {
         set_pause_ui(self.paused);
     }
 
+    /// The ship a Focus press locks onto: the first selected ship, else the
+    /// player mothership (carrier), else any player ship.
+    fn focus_candidate(&self) -> Option<EntityId> {
+        if let Some(id) = self.selected.first().copied() {
+            return Some(id);
+        }
+        let mut fallback = None;
+        for e in &self.world.entities {
+            if e.ship.team != Team::Player {
+                continue;
+            }
+            if e.ship.class == ShipClass::Carrier {
+                return Some(e.id);
+            }
+            fallback.get_or_insert(e.id);
+        }
+        fallback
+    }
+
+    /// Lock the camera onto the focus candidate, or unlock if already locked
+    /// onto it (so the button toggles).
+    fn toggle_focus(&mut self) {
+        match self.focus_candidate() {
+            Some(id) if self.focus_target == Some(id) => {
+                self.focus_target = None;
+                #[cfg(target_arch = "wasm32")]
+                set_focus_ui(false);
+            }
+            Some(id) => {
+                self.focus_target = Some(id);
+                #[cfg(target_arch = "wasm32")]
+                set_focus_ui(true);
+            }
+            None => {}
+        }
+    }
+
     /// Keyboard handling. WASD + arrows pan and Q/E change elevation (held; the
     /// camera applies them each frame). `Shift+A` selects all and `Shift+S`
     /// stops (so A/S stay free to pan); `C` cycles formation; `Esc` clears.
@@ -1335,6 +1472,11 @@ impl App {
                     log::info!("formation: {}", self.formation.label());
                 }
             }
+            Key::Character("f") | Key::Character("F") => {
+                if first {
+                    self.toggle_focus();
+                }
+            }
             Key::Named(NamedKey::Escape) => {
                 if first {
                     self.selected.clear();
@@ -1391,6 +1533,11 @@ impl App {
                 UiCmd::BoxSelectArm(on) => self.box_select_armed = on,
                 UiCmd::OpenBuild => {
                     self.build_open = true;
+                    // Start each open from a clean spinning pose.
+                    self.preview_yaw = 0.0;
+                    self.preview_pitch = PREVIEW_PITCH;
+                    self.preview_idle = PREVIEW_RETURN_DELAY;
+                    self.preview_dragging = false;
                     show_build_overlay(true);
                 }
                 UiCmd::CloseBuild => {
@@ -1402,6 +1549,7 @@ impl App {
                     class: self.build_preview,
                 }),
                 UiCmd::TogglePause => self.toggle_pause(),
+                UiCmd::ToggleFocus => self.toggle_focus(),
             }
         }
     }
@@ -1943,6 +2091,8 @@ enum UiCmd {
     BuildSelected,
     /// Toggle the single-player sim pause.
     TogglePause,
+    /// Toggle camera lock-on to the selected ship (or mothership).
+    ToggleFocus,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1969,6 +2119,7 @@ fn wire_dom_controls() {
         ("sol-formation", UiCmd::CycleFormation),
         ("sol-pause", UiCmd::TogglePause),
         ("sol-bo-pause", UiCmd::TogglePause),
+        ("sol-focus", UiCmd::ToggleFocus),
     ] {
         if let Some(el) = doc.get_element_by_id(id) {
             let cb = Closure::<dyn FnMut()>::new(move || push_ui(cmd));
@@ -2075,15 +2226,38 @@ fn set_pause_ui(paused: bool) {
     }
 }
 
-/// Show or hide the full-screen build overlay.
+/// Reflect the camera lock-on state on the Focus button (label + active class).
+#[cfg(target_arch = "wasm32")]
+fn set_focus_ui(active: bool) {
+    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+        if let Some(el) = doc.get_element_by_id("sol-focus") {
+            let _ = el.class_list().toggle_with_force("active", active);
+            el.set_text_content(Some(if active { "Unfocus" } else { "Focus" }));
+        }
+    }
+}
+
+/// Show or hide the full-screen build overlay. While it is up, the in-world
+/// controls and the mobile camera pad are hidden: there is nothing to move or
+/// select in build mode.
 #[cfg(target_arch = "wasm32")]
 fn show_build_overlay(show: bool) {
-    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
-        if let Some(el) = doc.get_element_by_id("sol-build-overlay") {
+    let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+        return;
+    };
+    if let Some(el) = doc.get_element_by_id("sol-build-overlay") {
+        if show {
+            let _ = el.remove_attribute("hidden");
+        } else {
+            let _ = el.set_attribute("hidden", "");
+        }
+    }
+    for id in ["sol-controls", "sol-pad"] {
+        if let Some(el) = doc.get_element_by_id(id) {
             if show {
-                let _ = el.remove_attribute("hidden");
-            } else {
                 let _ = el.set_attribute("hidden", "");
+            } else {
+                let _ = el.remove_attribute("hidden");
             }
         }
     }
@@ -2124,6 +2298,26 @@ fn update_build_overlay(world: &World, preview: ShipClass) {
             let _ = el.remove_attribute("disabled");
         } else {
             let _ = el.set_attribute("disabled", "");
+        }
+    }
+    // Homeworld-style build button: a progress "slider" fill for the current
+    // item, plus a yellow xN badge showing the whole queue depth at a glance.
+    let (frac, depth) = match world.build_queue.first() {
+        Some(b) => {
+            let bt = world.registry.get(b.class).build_time.max(0.001);
+            ((b.progress / bt).clamp(0.0, 1.0), world.build_queue.len())
+        }
+        None => (0.0, 0),
+    };
+    if let Some(el) = doc.get_element_by_id("sol-bo-build-fill") {
+        let _ = el.set_attribute("style", &format!("width:{:.1}%", frac * 100.0));
+    }
+    if let Some(el) = doc.get_element_by_id("sol-bo-count") {
+        if depth > 0 {
+            el.set_text_content(Some(&format!("x{depth}")));
+            let _ = el.remove_attribute("hidden");
+        } else {
+            let _ = el.set_attribute("hidden", "");
         }
     }
 }

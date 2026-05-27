@@ -714,7 +714,8 @@ the target as the order set lands:
 | Select all (player) | **`Shift+A`** or the **Select All** button |
 | Stop | **`Shift+S`** or the **Stop** button |
 | Clear selection | **`Esc`** or the **Clear** button |
-| Open build overlay | **Build** HUD button (Esc / **Close** to exit) |
+| Open build overlay | **Build** HUD button (Esc / **Close** to exit); build mode hides the in-world controls + camera pad |
+| Focus camera on ship | **`F`** or the **Focus** button: locks onto the selected ship (or the mothership); any pan unlocks |
 | Pause / resume | **`Space`** or the **Pause** button (works any time, incl. over the build overlay) |
 
 **Pause is single-player, local, and active.** It stops *advancing* the
@@ -726,10 +727,23 @@ each frame (`World::apply_commands`) without calling `World::step`. It does not
 pause "the world" for anyone else; lockstep multiplayer will need a synchronized
 pause command instead.
 
+**Build overlay (Homeworld-style).** The previewed ship is a slow auto-spinning
+turntable; drag it (mouse or finger, on the empty centre of the overlay) to
+inspect it from any angle, and after a short idle it eases back into the spin.
+The **Build** button doubles as the queue readout: a progress "slider" fills it
+as the current ship builds, and a yellow **xN** badge shows how many ships are in
+the queue at a glance. Build mode hides the in-world movement/selection controls
+and the mobile camera pad (there is nothing to move there).
+
+**Camera focus lock.** `F` (or the **Focus** button) anchors the camera on the
+selected ship, or the mothership when nothing is selected, and tracks it each
+frame; orbit and zoom still work, so you circle the locked ship. Any pan input
+(`WASD`/arrows, edge-scroll, or the mobile joystick) releases the lock, matching
+the target table's focus-on-selection role for `F`.
+
 Because `WASD` pans here, the target table's `W/S/D` order keys (waypoint / stop /
 dock) are not yet bound; `Stop` and `Select All` move to `Shift+S` / `Shift+A`
-(holding `Shift` shows an on-screen hint). `F` (focus on selection) stays
-unbound so it is free for its target role.
+(holding `Shift` shows an on-screen hint).
 
 ### 9.6 Mobile test harness (input parity)
 

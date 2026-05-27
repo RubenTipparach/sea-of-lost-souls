@@ -99,6 +99,12 @@
         background: #1c4a73;
         border-color: #4f9fe0;
       }
+      /* Highlight the Focus button while the camera is locked onto a ship. */
+      #sol-focus.active {
+        background: #1c4a73;
+        border-color: #6fb2ee;
+        color: #fff;
+      }
       /* Shift hint: shown (by the app) while Shift is held on desktop. */
       #sol-shift-hint {
         position: fixed;
@@ -125,6 +131,8 @@
         z-index: 40;
         display: flex;
         pointer-events: auto;
+        /* A drag on the empty centre rotates the ship; don't scroll the page. */
+        touch-action: none;
         background: radial-gradient(
           circle at 60% 45%,
           rgba(4, 8, 16, 0) 30%,
@@ -200,6 +208,8 @@
         padding: 12px 18px;
       }
       #sol-bo-build {
+        position: relative;
+        overflow: hidden;
         border: 1px solid #2f9e57;
         background: #16683a;
         color: #eafff1;
@@ -209,6 +219,32 @@
         border-color: #34465a;
         background: #233040;
         cursor: default;
+      }
+      /* Build-progress "slider" fill across the button (width set per frame). */
+      #sol-bo-build-fill {
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 0%;
+        background: rgba(120, 235, 165, 0.45);
+        pointer-events: none;
+        transition: width 0.12s linear;
+      }
+      .bo-build-label {
+        position: relative;
+        z-index: 1;
+      }
+      /* Yellow queue-depth badge (xN) so the queue size reads at a glance. */
+      #sol-bo-count {
+        position: relative;
+        z-index: 1;
+        margin-left: 8px;
+        color: #ffd54a;
+        font-weight: 800;
+      }
+      #sol-bo-count[hidden] {
+        display: none;
       }
       #sol-bo-close,
       #sol-bo-pause {
@@ -431,10 +467,58 @@
       <div id="sol-bo-bar">
         <div id="sol-bo-info">Fighter</div>
         <button id="sol-bo-pause" type="button">Pause</button>
-        <button id="sol-bo-build" type="button">Build</button>
+        <button id="sol-bo-build" type="button">
+          <span id="sol-bo-build-fill"></span>
+          <span class="bo-build-label">Build</span>
+          <span id="sol-bo-count" hidden>x1</span>
+        </button>
         <button id="sol-bo-close" type="button">Close</button>
       </div>
     </div>
+    <script>
+      // Build-overlay turntable: a pointer drag on the empty centre of the
+      // overlay rotates the previewed ship. We accumulate the pointer delta into
+      // window globals that the wasm app samples (and zeroes) each frame; the app
+      // resumes the auto-spin after a short idle. Dragging on the class list or
+      // the bottom bar is a real button press, so we only start on the overlay
+      // element itself.
+      (function () {
+        window.__solPrevDX = 0;
+        window.__solPrevDY = 0;
+        window.__solPrevDrag = 0;
+        var ov = document.getElementById("sol-build-overlay");
+        if (!ov) return;
+        var pid = null,
+          lastX = 0,
+          lastY = 0;
+        ov.addEventListener("pointerdown", function (e) {
+          if (e.target !== ov) return;
+          pid = e.pointerId;
+          lastX = e.clientX;
+          lastY = e.clientY;
+          window.__solPrevDrag = 1;
+          try {
+            ov.setPointerCapture(pid);
+          } catch (_) {}
+          e.preventDefault();
+        });
+        ov.addEventListener("pointermove", function (e) {
+          if (e.pointerId !== pid) return;
+          window.__solPrevDX += e.clientX - lastX;
+          window.__solPrevDY += e.clientY - lastY;
+          lastX = e.clientX;
+          lastY = e.clientY;
+          e.preventDefault();
+        });
+        function end(e) {
+          if (e.pointerId !== pid) return;
+          pid = null;
+          window.__solPrevDrag = 0;
+        }
+        ov.addEventListener("pointerup", end);
+        ov.addEventListener("pointercancel", end);
+      })();
+    </script>
     <div id="sol-paused" hidden>PAUSED</div>
     <div id="sol-controls">
       <button id="sol-pause" type="button">Pause</button>
@@ -442,6 +526,7 @@
       <button id="sol-select-all" type="button">Select All</button>
       <button id="sol-box-select" type="button">Box Select</button>
       <button id="sol-formation" type="button">Form: Parade</button>
+      <button id="sol-focus" type="button">Focus</button>
       <button id="sol-stop" type="button">Stop</button>
       <button id="sol-clear" type="button">Clear</button>
     </div>
