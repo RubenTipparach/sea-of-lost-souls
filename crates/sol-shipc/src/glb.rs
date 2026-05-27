@@ -389,16 +389,25 @@ fn hull_texture(accent: [u8; 3]) -> (u32, u32, Vec<u8>) {
                 g = accent[1] as i32;
                 b = accent[2] as i32;
             }
-            // Scattered warm "lights".
+            // Emissive windows: the alpha channel marks emissive texels so they
+            // glow even on the unlit side, reading the silhouette in the dark.
+            let mut emissive = false;
             if x % 8 == 4 && y % 8 == 4 {
-                r = 210;
-                g = 200;
-                b = 130;
+                r = 235;
+                g = 220;
+                b = 150;
+                emissive = true;
+            }
+            if y % 16 == 9 && x % 4 == 2 {
+                r = 150;
+                g = 215;
+                b = 245;
+                emissive = true;
             }
             px[i] = r.clamp(0, 255) as u8;
             px[i + 1] = g.clamp(0, 255) as u8;
             px[i + 2] = b.clamp(0, 255) as u8;
-            px[i + 3] = 255;
+            px[i + 3] = if emissive { 255 } else { 0 };
         }
     }
     (S, S, px)

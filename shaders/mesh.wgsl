@@ -70,5 +70,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let ambient = 0.18;
     let tex = textureSample(base_tex, base_sampler, in.uv);
     let lit = tex.rgb * camera.base_color.rgb * in.tint.rgb * (ambient + lambert * 0.85);
-    return vec4<f32>(lit, 1.0);
+    // The texture alpha marks emissive texels (windows); add them unlit so they
+    // glow regardless of the light direction.
+    let emissive = tex.rgb * tex.a * 1.6;
+    return vec4<f32>(lit + emissive, 1.0);
 }
