@@ -23,6 +23,12 @@ pub struct ShipDef {
     /// Relative path (within the ship directory) to the GLB mesh.
     pub model: String,
     pub mass: f32,
+    pub mobility: Mobility,
+    pub build: Build,
+    #[serde(default)]
+    pub cargo: Option<Cargo>,
+    #[serde(default)]
+    pub production: Option<Production>,
     pub crew: Crew,
     pub hull: Hull,
     pub colliders: Vec<Collider>,
@@ -35,6 +41,35 @@ pub struct ShipDef {
 pub struct Crew {
     pub min: u32,
     pub optimal: u32,
+}
+
+/// Movement envelope consumed by the steering sim. Units: world units per
+/// second, world units per second squared, and degrees per second.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Mobility {
+    pub max_speed: f32,
+    pub accel: f32,
+    pub turn_rate_deg: f32,
+}
+
+/// Production cost: salvage spent and seconds to build at a carrier.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Build {
+    pub salvage: f32,
+    pub time: f32,
+}
+
+/// Optional cargo hold: salvage units a collector can carry.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Cargo {
+    pub capacity: f32,
+}
+
+/// Optional production capability: concurrent build bays (e.g. the carrier).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Production {
+    pub bays: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -140,10 +175,17 @@ mod tests {
     #[test]
     fn deserializes_test_interceptor() {
         let def = ShipDef::from_json_str(TEST_SHIP).expect("parse");
-        assert_eq!(def.schema_version, 1);
+        assert_eq!(def.schema_version, 2);
         assert_eq!(def.id, "test_interceptor");
         assert_eq!(def.class, "strike");
         assert_eq!(def.mass, 60.0);
+        assert_eq!(def.mobility.max_speed, 140.0);
+        assert_eq!(def.mobility.accel, 80.0);
+        assert_eq!(def.mobility.turn_rate_deg, 120.0);
+        assert_eq!(def.build.salvage, 30.0);
+        assert_eq!(def.build.time, 12.0);
+        assert!(def.cargo.is_none());
+        assert!(def.production.is_none());
         assert_eq!(def.crew.min, 1);
         assert_eq!(def.hull.sections, vec!["fore", "aft"]);
         assert_eq!(def.colliders[0].kind, "convexHull");

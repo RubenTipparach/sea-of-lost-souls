@@ -11,6 +11,25 @@ export interface Crew {
   optimal: number;
 }
 
+export interface Mobility {
+  maxSpeed: number;
+  accel: number;
+  turnRateDeg: number;
+}
+
+export interface Build {
+  salvage: number;
+  time: number;
+}
+
+export interface Cargo {
+  capacity: number;
+}
+
+export interface Production {
+  bays: number;
+}
+
 export interface Hull {
   sections: string[];
   integrity: number;
@@ -74,6 +93,10 @@ export interface ShipDef {
   class: string;
   model: string;
   mass: number;
+  mobility: Mobility;
+  build: Build;
+  cargo?: Cargo;
+  production?: Production;
   crew: Crew;
   hull: Hull;
   colliders: Collider[];
@@ -86,13 +109,15 @@ export interface ShipDef {
 // Export produces a valid, pipeline-ready file immediately.
 export function defaultShipDef(): ShipDef {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: 'test_interceptor',
     name: 'Test Interceptor',
     faction: 'player',
     class: 'strike',
     model: 'model.glb',
     mass: 60,
+    mobility: { maxSpeed: 140, accel: 80, turnRateDeg: 120 },
+    build: { salvage: 30, time: 12 },
     crew: { min: 1, optimal: 1 },
     hull: { sections: ['fore', 'aft'], integrity: 80 },
     colliders: [{ type: 'convexHull', node: 'hull' }],
