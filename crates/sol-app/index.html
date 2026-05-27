@@ -215,6 +215,25 @@
         background: rgba(11, 26, 43, 0.92);
         color: #cfe0f5;
       }
+      /* Pause banner, top-center. */
+      #sol-paused {
+        position: fixed;
+        top: 12px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 41;
+        padding: 7px 16px;
+        background: rgba(40, 16, 16, 0.82);
+        border: 1px solid #c2683a;
+        border-radius: 8px;
+        color: #ffd9b0;
+        font: 800 15px/1 system-ui, sans-serif;
+        letter-spacing: 0.12em;
+        pointer-events: none;
+      }
+      #sol-paused[hidden] {
+        display: none;
+      }
       /* Crew + current-production readouts, top-left under the salvage counter. */
       #sol-crew,
       #sol-build-status {
@@ -414,7 +433,9 @@
         <button id="sol-bo-close" type="button">Close</button>
       </div>
     </div>
+    <div id="sol-paused" hidden>PAUSED</div>
     <div id="sol-controls">
+      <button id="sol-pause" type="button">Pause</button>
       <button id="sol-build-toggle" type="button">Build</button>
       <button id="sol-select-all" type="button">Select All</button>
       <button id="sol-box-select" type="button">Box Select</button>
@@ -422,6 +443,13 @@
       <button id="sol-stop" type="button">Stop</button>
       <button id="sol-clear" type="button">Clear</button>
     </div>
+    <script>
+      // Blur a control button after clicking so Space/Enter (pause, etc.) don't
+      // re-activate the last-focused button.
+      document.addEventListener("click", function (e) {
+        if (e.target && e.target.tagName === "BUTTON") e.target.blur();
+      });
+    </script>
     <div id="sol-shift-hint" hidden>Shift: A = Select All, S = Stop</div>
     <div id="sol-pad">
       <div id="sol-elev">

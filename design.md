@@ -714,6 +714,12 @@ the target as the order set lands:
 | Select all (player) | **`Shift+A`** or the **Select All** button |
 | Stop | **`Shift+S`** or the **Stop** button |
 | Clear selection | **`Esc`** or the **Clear** button |
+| Open build overlay | **Build** HUD button (Esc / **Close** to exit) |
+| Pause / resume | **`Space`** or the **Pause** button (works any time, incl. over the build overlay) |
+
+**Pause is single-player and local.** It just stops advancing the fixed-step
+sim (the camera and UI keep working); it does not pause "the world" for anyone
+else. Lockstep multiplayer will need a synchronized pause command instead.
 
 Because `WASD` pans here, the target table's `W/S/D` order keys (waypoint / stop /
 dock) are not yet bound; `Stop` and `Select All` move to `Shift+S` / `Shift+A`

@@ -230,6 +230,10 @@ struct App {
     build_open: bool,
     /// Ship class currently previewed in the build overlay.
     build_preview: ShipClass,
+    /// Single-player pause: when set, the fixed-step sim is not advanced (the
+    /// camera and UI still work). App-side only; a lockstep-synced pause is a
+    /// future multiplayer concern.
+    paused: bool,
     /// In-progress band-select rectangle as (start, current) in physical pixels.
     /// Set while dragging (desktop LMB, or mobile with the box-select button
     /// held); drawn as a HUD rectangle and finalized on release.
@@ -277,6 +281,7 @@ impl App {
             formation: Formation::Parade,
             build_open: false,
             build_preview: ShipClass::Fighter,
+            paused: false,
             select_box: None,
             box_select_armed: false,
             pan_keys: PanKeys::default(),
@@ -399,16 +404,20 @@ impl App {
             Some(prev) => (now - prev).as_secs_f32().min(0.25),
             None => 0.0,
         };
-        self.accumulator += frame_dt;
         self.elapsed += frame_dt;
-        // Camera panning/elevation is app-side and uses real frame time.
+        // Camera panning/elevation is app-side and keeps working while paused.
         self.apply_camera_pan(frame_dt);
         let dt = sol_sim::TICK_DT;
-        let mut steps = 0;
-        while self.accumulator >= dt && steps < 8 {
-            self.world.step(dt);
-            self.accumulator -= dt;
-            steps += 1;
+        // Single-player pause freezes the sim (no steps); the accumulator and
+        // interpolation alpha hold, so the fleet renders frozen in place.
+        if !self.paused {
+            self.accumulator += frame_dt;
+            let mut steps = 0;
+            while self.accumulator >= dt && steps < 8 {
+                self.world.step(dt);
+                self.accumulator -= dt;
+                steps += 1;
+            }
         }
         let alpha = if dt > 0.0 {
             (self.accumulator / dt).clamp(0.0, 1.0)
@@ -1254,6 +1263,13 @@ impl App {
         }
     }
 
+    fn toggle_pause(&mut self) {
+        self.paused = !self.paused;
+        log::info!("paused: {}", self.paused);
+        #[cfg(target_arch = "wasm32")]
+        set_pause_ui(self.paused);
+    }
+
     /// Keyboard handling. WASD + arrows pan and Q/E change elevation (held; the
     /// camera applies them each frame). `Shift+A` selects all and `Shift+S`
     /// stops (so A/S stay free to pan); `C` cycles formation; `Esc` clears.
@@ -1262,6 +1278,11 @@ impl App {
         let pressed = event.state == ElementState::Pressed;
         // One-shot actions fire on the initial press, not on auto-repeat.
         let first = pressed && !event.repeat;
+        // Pause toggles at any time, including over the build overlay.
+        if first && event.logical_key == Key::Named(NamedKey::Space) {
+            self.toggle_pause();
+            return;
+        }
         // While the build overlay is open, in-world keys are suspended; Esc closes.
         if self.build_open {
             if first && event.logical_key == Key::Named(NamedKey::Escape) {
@@ -1375,6 +1396,7 @@ impl App {
                 UiCmd::BuildSelected => self.world.enqueue(Command::Build {
                     class: self.build_preview,
                 }),
+                UiCmd::TogglePause => self.toggle_pause(),
             }
         }
     }
@@ -1914,6 +1936,8 @@ enum UiCmd {
     PreviewBuild(ShipClass),
     /// Queue the currently previewed class for construction (if affordable).
     BuildSelected,
+    /// Toggle the single-player sim pause.
+    TogglePause,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1938,6 +1962,7 @@ fn wire_dom_controls() {
         ("sol-stop", UiCmd::Stop),
         ("sol-clear", UiCmd::Clear),
         ("sol-formation", UiCmd::CycleFormation),
+        ("sol-pause", UiCmd::TogglePause),
     ] {
         if let Some(el) = doc.get_element_by_id(id) {
             let cb = Closure::<dyn FnMut()>::new(move || push_ui(cmd));
@@ -2022,6 +2047,24 @@ const BUILD_BUTTONS: [(&str, ShipClass); 7] = [
     ("sol-build-frigate_missile", ShipClass::FrigateMissile),
     ("sol-build-capital_destroyer", ShipClass::CapitalDestroyer),
 ];
+
+/// Reflect the pause state in the HUD: a "PAUSED" banner and the button label.
+#[cfg(target_arch = "wasm32")]
+fn set_pause_ui(paused: bool) {
+    let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+        return;
+    };
+    if let Some(el) = doc.get_element_by_id("sol-paused") {
+        if paused {
+            let _ = el.remove_attribute("hidden");
+        } else {
+            let _ = el.set_attribute("hidden", "");
+        }
+    }
+    if let Some(el) = doc.get_element_by_id("sol-pause") {
+        el.set_text_content(Some(if paused { "Resume" } else { "Pause" }));
+    }
+}
 
 /// Show or hide the full-screen build overlay.
 #[cfg(target_arch = "wasm32")]
