@@ -418,6 +418,11 @@ impl App {
                 self.accumulator -= dt;
                 steps += 1;
             }
+        } else {
+            // Paused: orders still take effect immediately (active pause) so the
+            // player can build/queue at their leisure, but the world does not
+            // advance (no movement, harvest, or build progress).
+            self.world.apply_commands();
         }
         let alpha = if dt > 0.0 {
             (self.accumulator / dt).clamp(0.0, 1.0)

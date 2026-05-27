@@ -570,11 +570,11 @@ impl World {
         self.entities.iter_mut().find(|e| e.id == id)
     }
 
-    /// Advance the simulation by one fixed timestep `dt` (seconds):
-    /// apply queued commands, snapshot transforms for interpolation, then
-    /// integrate. Iteration is in stable order; no wall-clock or OS RNG.
-    pub fn step(&mut self, dt: f32) {
-        // 1) Apply queued orders at this step boundary, in arrival order.
+    /// Drain and apply all queued commands. Orders take effect here. Exposed so
+    /// single-player pause can register commands immediately (build debits and
+    /// queues, move/stop orders set) WITHOUT advancing the world; [`World::step`]
+    /// calls it each tick.
+    pub fn apply_commands(&mut self) {
         let pending = std::mem::take(&mut self.pending);
         for command in pending {
             match command {
@@ -627,6 +627,14 @@ impl World {
                 }
             }
         }
+    }
+
+    /// Advance the simulation by one fixed timestep `dt` (seconds): apply queued
+    /// commands, snapshot transforms for interpolation, then integrate. Iteration
+    /// is in stable order; no wall-clock or OS RNG.
+    pub fn step(&mut self, dt: f32) {
+        // 1) Apply queued orders at this step boundary, in arrival order.
+        self.apply_commands();
 
         // 2) Snapshot positions+radii BEFORE moving anyone, so separation is
         // order independent (ship A's move can't change ship B's input this step).
@@ -1143,6 +1151,35 @@ mod tests {
         w.spawn_class(ShipClass::Fighter, Team::Player, Vec3::new(-20.0, 0.0, 0.0));
         // Frigate draws 100 ops; fighter draws 1 pilot.
         assert_eq!(w.crew_free(), (2000 - 100, 100 - 1));
+    }
+
+    #[test]
+    fn apply_commands_registers_orders_without_advancing() {
+        // The active-pause path: commands take effect, but nothing advances.
+        let mut w = World::new(4);
+        w.spawn_class(ShipClass::Carrier, Team::Player, Vec3::ZERO);
+        let id = w.spawn_class(ShipClass::Corvette, Team::Player, Vec3::ZERO);
+        w.salvage = 500.0;
+        let cost = w.registry.get(ShipClass::Fighter).cost;
+        let tick0 = w.tick;
+
+        w.enqueue(Command::Build {
+            class: ShipClass::Fighter,
+        });
+        w.enqueue(Command::MoveTo {
+            entity: id,
+            target: Vec3::new(20.0, 0.0, 0.0),
+        });
+        w.apply_commands();
+
+        // Build debited + queued immediately, but it has not progressed.
+        assert_eq!(w.salvage, 500.0 - cost);
+        assert_eq!(w.build_queue.len(), 1);
+        assert_eq!(w.build_queue[0].progress, 0.0);
+        // Move order registered, but the ship has not moved and no tick elapsed.
+        assert_eq!(w.entity(id).unwrap().order, Some(Vec3::new(20.0, 0.0, 0.0)));
+        assert_eq!(w.entity(id).unwrap().transform.pos, Vec3::ZERO);
+        assert_eq!(w.tick, tick0);
     }
 
     #[test]

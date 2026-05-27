@@ -717,9 +717,14 @@ the target as the order set lands:
 | Open build overlay | **Build** HUD button (Esc / **Close** to exit) |
 | Pause / resume | **`Space`** or the **Pause** button (works any time, incl. over the build overlay) |
 
-**Pause is single-player and local.** It just stops advancing the fixed-step
-sim (the camera and UI keep working); it does not pause "the world" for anyone
-else. Lockstep multiplayer will need a synchronized pause command instead.
+**Pause is single-player, local, and active.** It stops *advancing* the
+fixed-step sim (no movement, harvest, or build progress; the camera and UI keep
+working), but **orders still take effect immediately**: you can pause, queue
+builds and moves (salvage debits and the build queue updates right away), then
+resume to watch them play out. Mechanically, pause keeps applying queued commands
+each frame (`World::apply_commands`) without calling `World::step`. It does not
+pause "the world" for anyone else; lockstep multiplayer will need a synchronized
+pause command instead.
 
 Because `WASD` pans here, the target table's `W/S/D` order keys (waypoint / stop /
 dock) are not yet bound; `Stop` and `Select All` move to `Shift+S` / `Shift+A`
