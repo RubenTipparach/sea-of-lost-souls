@@ -142,16 +142,28 @@
       #sol-build-panel button:active {
         background: #1c4a73;
       }
-      /* Current-production readout, top-left under the salvage counter. */
+      /* Unaffordable build options are greyed out and inert. */
+      #sol-build-panel button:disabled {
+        opacity: 0.4;
+        border-color: #34465a;
+        cursor: default;
+      }
+      /* Crew + current-production readouts, top-left under the salvage counter. */
+      #sol-crew,
       #sol-build-status {
         position: fixed;
         left: 10px;
-        top: 44px;
         z-index: 21;
         color: #bcd3ee;
         font: 600 13px/1 system-ui, sans-serif;
         text-shadow: 0 1px 2px #000;
         pointer-events: none;
+      }
+      #sol-crew {
+        top: 44px;
+      }
+      #sol-build-status {
+        top: 64px;
       }
       /* Resource readout: banked salvage, top-left. */
       #sol-resources {
@@ -316,6 +328,7 @@
       })();
     </script>
     <div id="sol-resources">Salvage: 0</div>
+    <div id="sol-crew"></div>
     <div id="sol-build-status"></div>
     <div id="sol-build-panel" hidden>
       <button id="sol-build-fighter" type="button">Fighter (30)</button>

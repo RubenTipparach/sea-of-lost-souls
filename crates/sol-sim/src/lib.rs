@@ -33,6 +33,11 @@ const SEPARATION_GAIN: f32 = 3.0;
 /// Salvage harvested per second while a resourcer sits in a node's gather range.
 const HARVEST_RATE: f32 = 60.0;
 
+/// Crew complement a carrier (the Ark) contributes to the player's pools. Other
+/// ships draw from these; the carrier itself requires no separate crew.
+const CARRIER_CREW_OPS: u32 = 2000;
+const CARRIER_CREW_PILOTS: u32 = 100;
+
 /// World-space position and orientation of an entity.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Transform {
@@ -159,41 +164,20 @@ impl ShipRegistry {
     /// Build the registry with Phase 1 placeholder stats (see the plan's ship
     /// suite table). Tuned later; the point now is that the sim reads them.
     pub fn with_defaults() -> Self {
-        // (class, mass t, max_speed, accel, turn deg/s, crew, radius, max_hull,
-        // cargo). Speeds are tuned for the current demo scene (tens of units
-        // across), not the plan's eventual large-world values; radius drives
-        // separation and picking; max_hull/cargo are placeholders until tuning.
-        type Row = (ShipClass, f32, f32, f32, f32, u32, f32, f32, f32);
+        // (class, mass t, max_speed, accel, turn deg/s, radius, max_hull, cargo).
+        // Speeds are tuned for the current demo scene (tens of units across);
+        // radius drives separation and picking; crew/cost/build come from the
+        // per-class match below.
+        type Row = (ShipClass, f32, f32, f32, f32, f32, f32, f32);
         let rows: [Row; 8] = [
-            (
-                ShipClass::Fighter,
-                18.0,
-                16.0,
-                24.0,
-                130.0,
-                2,
-                1.0,
-                80.0,
-                0.0,
-            ),
-            (
-                ShipClass::Bomber,
-                30.0,
-                12.0,
-                16.0,
-                90.0,
-                3,
-                1.5,
-                120.0,
-                0.0,
-            ),
+            (ShipClass::Fighter, 18.0, 16.0, 24.0, 130.0, 1.0, 80.0, 0.0),
+            (ShipClass::Bomber, 30.0, 12.0, 16.0, 90.0, 1.5, 120.0, 0.0),
             (
                 ShipClass::Corvette,
                 220.0,
                 10.0,
                 12.0,
                 70.0,
-                6,
                 2.25,
                 400.0,
                 0.0,
@@ -204,7 +188,6 @@ impl ShipRegistry {
                 8.0,
                 9.0,
                 55.0,
-                3,
                 2.5,
                 300.0,
                 200.0,
@@ -215,7 +198,6 @@ impl ShipRegistry {
                 6.0,
                 5.0,
                 30.0,
-                18,
                 4.25,
                 2000.0,
                 0.0,
@@ -226,7 +208,6 @@ impl ShipRegistry {
                 5.5,
                 4.5,
                 28.0,
-                18,
                 4.5,
                 1900.0,
                 0.0,
@@ -237,7 +218,6 @@ impl ShipRegistry {
                 4.0,
                 3.0,
                 14.0,
-                60,
                 6.0,
                 8000.0,
                 0.0,
@@ -248,25 +228,25 @@ impl ShipRegistry {
                 3.0,
                 2.0,
                 8.0,
-                120,
                 8.0,
                 20000.0,
                 0.0,
             ),
         ];
         let mut blueprints = HashMap::new();
-        for (class, mass, max_speed, accel, turn_rate_deg, crew, radius, max_hull, cargo) in rows {
-            // Build economy (salvage cost, seconds). Demo-tuned for snappy
-            // production; the eventual values live in `ship.json`.
-            let (cost, build_time) = match class {
-                ShipClass::Fighter => (30.0, 4.0),
-                ShipClass::Bomber => (50.0, 6.0),
-                ShipClass::Corvette => (120.0, 8.0),
-                ShipClass::Resourcer => (80.0, 7.0),
-                ShipClass::FrigateGeneral => (300.0, 16.0),
-                ShipClass::FrigateMissile => (340.0, 18.0),
-                ShipClass::CapitalDestroyer => (900.0, 30.0),
-                ShipClass::Carrier => (5000.0, 60.0),
+        for (class, mass, max_speed, accel, turn_rate_deg, radius, max_hull, cargo) in rows {
+            // Crew requirement (of the class's CrewKind), salvage cost, and build
+            // seconds. Carriers require no crew: they PROVIDE the pool (see
+            // CARRIER_CREW_*). Demo-tuned; eventual values live in ship.json.
+            let (crew, cost, build_time): (u32, f32, f32) = match class {
+                ShipClass::Fighter => (1, 30.0, 4.0),
+                ShipClass::Bomber => (2, 50.0, 6.0),
+                ShipClass::Corvette => (10, 120.0, 8.0),
+                ShipClass::Resourcer => (3, 80.0, 7.0),
+                ShipClass::FrigateGeneral => (100, 300.0, 16.0),
+                ShipClass::FrigateMissile => (100, 340.0, 18.0),
+                ShipClass::CapitalDestroyer => (400, 900.0, 30.0),
+                ShipClass::Carrier => (0, 5000.0, 60.0),
             };
             blueprints.insert(
                 class,
@@ -477,6 +457,60 @@ impl World {
         self.resource_nodes.iter().find(|n| n.id == id)
     }
 
+    /// Total crew pools `(ops, pilots)` provided by all carriers (the Arks).
+    pub fn crew_capacity(&self) -> (u32, u32) {
+        let carriers = self
+            .entities
+            .iter()
+            .filter(|e| e.ship.class == ShipClass::Carrier)
+            .count() as u32;
+        (carriers * CARRIER_CREW_OPS, carriers * CARRIER_CREW_PILOTS)
+    }
+
+    /// Crew `(ops, pilots)` committed to existing ships AND queued builds, so a
+    /// queued build reserves its crew immediately (prevents over-committing).
+    /// Carriers consume none (they only provide).
+    pub fn crew_used(&self) -> (u32, u32) {
+        let (mut ops, mut pilots) = (0u32, 0u32);
+        let classes = self
+            .entities
+            .iter()
+            .map(|e| e.ship.class)
+            .chain(self.build_queue.iter().map(|b| b.class));
+        for class in classes {
+            if class == ShipClass::Carrier {
+                continue;
+            }
+            let n = self.registry.get(class).crew;
+            match class.crew_kind() {
+                CrewKind::Ops => ops = ops.saturating_add(n),
+                CrewKind::Pilots => pilots = pilots.saturating_add(n),
+            }
+        }
+        (ops, pilots)
+    }
+
+    /// Free crew `(ops, pilots)` = capacity minus used (signed; can go negative
+    /// if a carrier is lost while its ships still fly).
+    pub fn crew_free(&self) -> (i32, i32) {
+        let (co, cp) = self.crew_capacity();
+        let (uo, up) = self.crew_used();
+        (co as i32 - uo as i32, cp as i32 - up as i32)
+    }
+
+    /// Whether a build of `class` can be afforded right now (salvage + crew).
+    pub fn can_build(&self, class: ShipClass) -> bool {
+        let bp = self.registry.get(class);
+        if bp.cost <= 0.0 || self.salvage < bp.cost {
+            return false;
+        }
+        let (free_ops, free_pilots) = self.crew_free();
+        match class.crew_kind() {
+            CrewKind::Ops => free_ops >= bp.crew as i32,
+            CrewKind::Pilots => free_pilots >= bp.crew as i32,
+        }
+    }
+
     /// Spawn a ship at `transform` and return its stable id.
     pub fn spawn(&mut self, ship: Ship, transform: Transform) -> EntityId {
         let id = EntityId(self.next_id);
@@ -581,9 +615,10 @@ impl World {
                     }
                 }
                 Command::Build { class } => {
-                    let cost = self.registry.get(class).cost;
-                    if cost > 0.0 && self.salvage >= cost {
-                        self.salvage -= cost;
+                    // Affordable means salvage AND free crew (queued builds
+                    // already count toward used crew, so this can't over-commit).
+                    if self.can_build(class) {
+                        self.salvage -= self.registry.get(class).cost;
                         self.build_queue.push(BuildItem {
                             class,
                             progress: 0.0,
@@ -1092,6 +1127,35 @@ mod tests {
             .entities
             .iter()
             .any(|e| e.ship.class == ShipClass::Corvette));
+    }
+
+    #[test]
+    fn carrier_provides_crew_and_ships_reserve_it() {
+        let mut w = World::new(4);
+        w.spawn_class(ShipClass::Carrier, Team::Player, Vec3::ZERO);
+        assert_eq!(w.crew_capacity(), (2000, 100));
+        assert_eq!(w.crew_free(), (2000, 100)); // carrier itself uses none
+        w.spawn_class(
+            ShipClass::FrigateGeneral,
+            Team::Player,
+            Vec3::new(20.0, 0.0, 0.0),
+        );
+        w.spawn_class(ShipClass::Fighter, Team::Player, Vec3::new(-20.0, 0.0, 0.0));
+        // Frigate draws 100 ops; fighter draws 1 pilot.
+        assert_eq!(w.crew_free(), (2000 - 100, 100 - 1));
+    }
+
+    #[test]
+    fn build_rejected_without_crew() {
+        let mut w = World::new(4);
+        // No carrier means no crew pool, so even flush with salvage we can't build.
+        w.salvage = 1000.0;
+        w.enqueue(Command::Build {
+            class: ShipClass::Fighter,
+        });
+        w.step(TICK_DT);
+        assert!(w.build_queue.is_empty(), "built with no crew capacity");
+        assert_eq!(w.salvage, 1000.0, "salvage spent despite no crew");
     }
 
     #[test]

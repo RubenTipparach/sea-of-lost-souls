@@ -217,6 +217,21 @@ performance. Between missions, **low morale** can make crews leave entirely.
 Because crew are earned mainly through prestige (noble deeds across the
 campaign), they are the tightest constraint in the fleet economy.
 
+**Allocation is automatic by default.** Crew flows from the pool to ships
+automatically (e.g. a new build draws its complement on construction); a manual
+allocation mode is an opt-in **setting** for players who want to micro who staffs
+what. Either way, **the carrier (Ark) is the crew reservoir.**
+
+**Prototype crew model (current build).** Two pools, `Ops` and `Pilots`, are
+held by the carrier and **derived from fleet composition** (deterministic, in the
+checksum): free crew = carrier capacity minus the requirement of every ship and
+queued build. The starting carrier provides **2000 ops + 100 pilots**. Per-class
+requirements: fighter 1 pilot, bomber 2 pilots; corvette 10 ops, resourcer 3 ops,
+frigate (general/missile) 100 ops, capital destroyer 400 ops; the carrier
+requires none (it provides). A build is allowed only when both salvage **and**
+free crew of the right kind suffice; queued builds reserve their crew up front so
+production can't over-commit the roster.
+
 ### Capturing a ship
 
 ```mermaid
@@ -1310,12 +1325,15 @@ Three deliverables, all live on GitHub Pages from the first commit:
   amounts and the salvage pool are in the checksum); asteroid positions/amounts
   are seeded so they are identical across peers.
 - **Production (prototype build menu):** a HUD **Build** menu queues ship classes
-  for construction at the mothership. Salvage is debited up front (a `Build`
-  command), the front of the queue accrues build time each fixed step, and on
-  completion the ship spawns next to the carrier at a spread angle. The queue and
-  per-item progress are deterministic sim state (in the checksum); the menu, like
-  all controls, drives the same command path on desktop and touch. This closes
-  the gather -> bank -> build economy loop ([§3](#3-core-loop--roguelike-campaign)).
+  for construction at the mothership. A build needs both **salvage and free crew**
+  ([§5](#5-crew-capture--research)); the menu greys out options the player can't
+  afford. Salvage is debited up front (a `Build` command), the front of the queue
+  accrues build time each fixed step, and on completion the ship spawns next to
+  the carrier at a spread angle. The queue and per-item progress are deterministic
+  sim state (in the checksum); the menu, like all controls, drives the same
+  command path on desktop and touch. A HUD readout shows banked salvage, the crew
+  pools, and the current build. This closes the gather -> bank -> build economy
+  loop ([§3](#3-core-loop--roguelike-campaign)).
 - **Faction livery:** hulls are baked neutral grey with a livery mask in the
   texture alpha; the renderer multiplies a per-instance faction color onto those
   texels only (player blue, enemy red, resourcers forced yellow), so one hull

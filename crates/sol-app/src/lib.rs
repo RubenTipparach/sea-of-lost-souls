@@ -579,10 +579,12 @@ impl App {
             push_rect_outline_px(&mut overlay_lines, rect, [0.55, 0.85, 1.0, 0.9], (vw, vh));
         }
 
-        // Resource + build HUD readouts (web).
+        // Resource + crew + build HUD readouts (web).
         #[cfg(target_arch = "wasm32")]
         {
             set_resources(self.world.salvage, carrying_total);
+            set_crew(&self.world);
+            update_build_buttons(&self.world);
             let status = match self.world.build_queue.first() {
                 Some(b) => {
                     let bt = self.world.registry.get(b.class).build_time.max(0.001);
@@ -1863,15 +1865,7 @@ fn wire_dom_controls() {
         }
     }
     // Build-menu buttons: each queues a ship class for construction.
-    for (id, class) in [
-        ("sol-build-fighter", ShipClass::Fighter),
-        ("sol-build-bomber", ShipClass::Bomber),
-        ("sol-build-corvette", ShipClass::Corvette),
-        ("sol-build-resourcer", ShipClass::Resourcer),
-        ("sol-build-frigate_general", ShipClass::FrigateGeneral),
-        ("sol-build-frigate_missile", ShipClass::FrigateMissile),
-        ("sol-build-capital_destroyer", ShipClass::CapitalDestroyer),
-    ] {
+    for (id, class) in BUILD_BUTTONS {
         if let Some(el) = doc.get_element_by_id(id) {
             let cb = Closure::<dyn FnMut()>::new(move || push_ui(UiCmd::Build(class)));
             let _ = el.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref());
@@ -1920,6 +1914,52 @@ fn class_label(class: ShipClass) -> &'static str {
         ShipClass::FrigateMissile => "Missile Frigate",
         ShipClass::CapitalDestroyer => "Destroyer",
         ShipClass::Carrier => "Carrier",
+    }
+}
+
+/// Build-menu button ids paired with the class they queue. Shared by the click
+/// wiring and the per-frame affordability gating.
+#[cfg(target_arch = "wasm32")]
+const BUILD_BUTTONS: [(&str, ShipClass); 7] = [
+    ("sol-build-fighter", ShipClass::Fighter),
+    ("sol-build-bomber", ShipClass::Bomber),
+    ("sol-build-corvette", ShipClass::Corvette),
+    ("sol-build-resourcer", ShipClass::Resourcer),
+    ("sol-build-frigate_general", ShipClass::FrigateGeneral),
+    ("sol-build-frigate_missile", ShipClass::FrigateMissile),
+    ("sol-build-capital_destroyer", ShipClass::CapitalDestroyer),
+];
+
+/// Grey out (disable) build buttons the player can't currently afford (salvage
+/// or crew). Called each frame so the menu tracks the live economy.
+#[cfg(target_arch = "wasm32")]
+fn update_build_buttons(world: &World) {
+    let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+        return;
+    };
+    for (id, class) in BUILD_BUTTONS {
+        if let Some(el) = doc.get_element_by_id(id) {
+            if world.can_build(class) {
+                let _ = el.remove_attribute("disabled");
+            } else {
+                let _ = el.set_attribute("disabled", "");
+            }
+        }
+    }
+}
+
+/// Update the crew HUD readout: free / capacity for ops and pilots.
+#[cfg(target_arch = "wasm32")]
+fn set_crew(world: &World) {
+    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+        if let Some(el) = doc.get_element_by_id("sol-crew") {
+            let (cap_o, cap_p) = world.crew_capacity();
+            let (free_o, free_p) = world.crew_free();
+            el.set_text_content(Some(&format!(
+                "Crew  ops {}/{}   pilots {}/{}",
+                free_o, cap_o, free_p, cap_p
+            )));
+        }
     }
 }
 
