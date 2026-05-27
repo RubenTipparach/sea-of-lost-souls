@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 2,
+  "id": "carrier",
+  "name": "Carrier",
+  "faction": "player",
+  "class": "ark",
+  "model": "model.glb",
+  "mass": 40000.0,
+  "mobility": {
+    "maxSpeed": 3.0,
+    "accel": 2.0,
+    "turnRateDeg": 8.0
+  },
+  "build": {
+    "salvage": 5000.0,
+    "time": 300.0
+  },
+  "cargo": null,
+  "production": {
+    "bays": 2
+  },
+  "crew": {
+    "min": 120,
+    "optimal": 120
+  },
+  "hull": {
+    "sections": [
+      "fore",
+      "aft"
+    ],
+    "integrity": 80.0
+  },
+  "colliders": [
+    {
+      "type": "convexHull",
+      "node": "hull"
+    }
+  ],
+  "shields": {
+    "facings": 4,
+    "capacity": 40.0,
+    "regen": 4.0
+  },
+  "powerGrid": {
+    "reactor": {
+      "node": "reactor_core",
+      "output": 20.0
+    },
+    "capacitors": [
+      {
+        "node": "cap_main",
+        "capacity": 15.0
+      }
+    ],
+    "conduits": [
+      {
+        "from": "reactor_core",
+        "to": "bus_main",
+        "capacity": 20.0
+      },
+      {
+        "from": "bus_main",
+        "to": "engines",
+        "capacity": 10.0
+      },
+      {
+        "from": "bus_main",
+        "to": "shields",
+        "capacity": 8.0
+      },
+      {
+        "from": "bus_main",
+        "to": "sensors",
+        "capacity": 4.0
+      }
+    ],
+    "subsystems": [
+      {
+        "id": "engines",
+        "node": "engine_mount",
+        "draw": 8.0,
+        "priority": 2
+      },
+      {
+        "id": "shields",
+        "node": "shield_emitter",
+        "draw": 5.0,
+        "priority": 3
+      },
+      {
+        "id": "sensors",
+        "node": "sensor_array",
+        "draw": 2.0,
+        "priority": 1
+      }
+    ]
+  },
+  "hardpoints": [
+    {
+      "id": "nose_gun",
+      "node": "hp_nose",
+      "mount": "fixed",
+      "weapon": "pulse_cannon",
+      "arcDeg": 10.0,
+      "drawPerShot": 4.0
+    }
+  ]
+}

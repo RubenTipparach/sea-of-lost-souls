@@ -29,9 +29,9 @@ fn align4(n: usize) -> usize {
 }
 
 /// Build the GLB byte container for the interceptor.
-pub fn build_glb(mesh: &Mesh) -> anyhow::Result<Vec<u8>> {
+pub fn build_glb(mesh: &Mesh, accent: [u8; 3]) -> anyhow::Result<Vec<u8>> {
     // Pixel-art hull texture, generated offline and PNG-encoded for embedding.
-    let (tex_w, tex_h, tex_rgba) = hull_texture();
+    let (tex_w, tex_h, tex_rgba) = hull_texture(accent);
     let png_bytes = encode_png(tex_w, tex_h, &tex_rgba).context("encoding hull texture PNG")?;
 
     // --- Binary buffer: [positions][normals][uvs][indices][png] ---
@@ -366,7 +366,7 @@ fn bytemuck_cast<T: bytemuck::Pod>(slice: &[T]) -> &[u8] {
 /// A small, deterministic pixel-art hull texture (RGBA8): steel plating with
 /// panel grid lines, a blue accent band, and scattered warm lights. Authored
 /// offline and baked into the GLB; never generated at runtime.
-fn hull_texture() -> (u32, u32, Vec<u8>) {
+fn hull_texture(accent: [u8; 3]) -> (u32, u32, Vec<u8>) {
     const S: u32 = 32;
     let mut px = vec![0u8; (S * S * 4) as usize];
     for y in 0..S {
@@ -383,11 +383,11 @@ fn hull_texture() -> (u32, u32, Vec<u8>) {
                 g -= 34;
                 b -= 34;
             }
-            // A blue accent band.
+            // A per-class accent band.
             if (10..=13).contains(&y) {
-                r = 40;
-                g = 95;
-                b = 150;
+                r = accent[0] as i32;
+                g = accent[1] as i32;
+                b = accent[2] as i32;
             }
             // Scattered warm "lights".
             if x % 8 == 4 && y % 8 == 4 {

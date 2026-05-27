@@ -35,6 +35,7 @@ fn run() -> anyhow::Result<()> {
 
     match cmd.as_str() {
         "gen-test-ship" => gen::run(),
+        "gen-ships" => gen::run_ships(),
         "build" => {
             let rest: Vec<String> = args.collect();
             let (ships_dir, out_dir) = parse_build_args(&rest)?;
@@ -85,8 +86,9 @@ sol-shipc - Sea of Lost Souls asset compiler
 
 USAGE:
     sol-shipc gen-test-ship
+    sol-shipc gen-ships
     sol-shipc build <ships_dir> --out <out_dir>
 
 EXAMPLES:
-    sol-shipc gen-test-ship
+    sol-shipc gen-ships
     sol-shipc build assets/ships --out assets/compiled";
