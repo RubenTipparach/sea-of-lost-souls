@@ -62,6 +62,30 @@ const MAX_DISTANCE: f32 = 80.0;
 /// Pitch clamp to avoid gimbal flip at the poles.
 const PITCH_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.05;
 
+/// Held pan/elevation keys (WASD + arrows pan the focus; Q/E change altitude).
+/// Read every frame so panning is smooth and framerate-independent.
+#[derive(Default)]
+struct PanKeys {
+    forward: bool,
+    back: bool,
+    left: bool,
+    right: bool,
+    rise: bool,
+    fall: bool,
+}
+
+impl PanKeys {
+    /// Net (right, forward, elevation) input in [-1, 1] per axis from held keys.
+    fn axes(&self) -> (f32, f32, f32) {
+        let axis = |pos: bool, neg: bool| (pos as i32 - neg as i32) as f32;
+        (
+            axis(self.right, self.left),
+            axis(self.forward, self.back),
+            axis(self.rise, self.fall),
+        )
+    }
+}
+
 /// Orbit-camera input controller (right-mouse-drag orbits; wheel dollies).
 struct CameraController {
     orbiting: bool,
@@ -201,6 +225,13 @@ struct App {
     /// Mobile: true while the "Box Select" button is held, so a one-finger drag
     /// draws a band box instead of orbiting the camera.
     box_select_armed: bool,
+    /// Held camera-pan / elevation keys (applied each frame).
+    pan_keys: PanKeys,
+    /// Whether Shift is held (Shift+A select all, Shift+S stop; shows a hint).
+    shift_down: bool,
+    /// Whether a real mouse cursor is inside the window (gates edge-scroll, so
+    /// it never fires on touch devices that have no hovering cursor).
+    cursor_in_window: bool,
     /// Latest cursor position in physical pixels.
     cursor: (f64, f64),
     /// Left/right mouse press positions, for click-vs-drag discrimination.
@@ -232,6 +263,9 @@ impl App {
             formation: Formation::Parade,
             select_box: None,
             box_select_armed: false,
+            pan_keys: PanKeys::default(),
+            shift_down: false,
+            cursor_in_window: false,
             cursor: (0.0, 0.0),
             lmb_down: None,
             rmb_down: None,
@@ -340,6 +374,8 @@ impl App {
             None => 0.0,
         };
         self.accumulator += frame_dt;
+        // Camera panning/elevation is app-side and uses real frame time.
+        self.apply_camera_pan(frame_dt);
         let dt = sol_sim::TICK_DT;
         let mut steps = 0;
         while self.accumulator >= dt && steps < 8 {
@@ -514,6 +550,30 @@ fn class_depth_rank(class: ShipClass) -> u8 {
     }
 }
 
+/// Mobile pan input as `(right, forward, elevation)` in [-1, 1], read from the
+/// JS joystick/slider via window globals. Always zero on native (desktop uses
+/// keys + edge-scroll).
+#[cfg(target_arch = "wasm32")]
+fn read_pan_input() -> (f32, f32, f32) {
+    use wasm_bindgen::JsValue;
+    let Some(win) = web_sys::window() else {
+        return (0.0, 0.0, 0.0);
+    };
+    let target: JsValue = win.into();
+    let read = |name: &str| -> f32 {
+        js_sys::Reflect::get(&target, &JsValue::from_str(name))
+            .ok()
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0) as f32
+    };
+    (read("__solPanX"), read("__solPanY"), read("__solElev"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_pan_input() -> (f32, f32, f32) {
+    (0.0, 0.0, 0.0)
+}
+
 // --- gizmo / HUD overlay geometry -----------------------------------------
 
 /// World-space line segment (two `BgVertex`, drawn with the line pipeline).
@@ -674,6 +734,64 @@ impl App {
         let px = (ndc.x * 0.5 + 0.5) * w;
         let py = (1.0 - (ndc.y * 0.5 + 0.5)) * h;
         Some((px as f64, py as f64))
+    }
+
+    /// Pan + elevate the camera focus from all input sources (held WASD/arrow
+    /// keys, desktop edge-scroll, mobile joystick + slider). App-side only;
+    /// never touches the sim. `dt` is real frame time, so panning is smooth and
+    /// framerate independent.
+    fn apply_camera_pan(&mut self, dt: f32) {
+        let (mut rx, mut fy, mut elev) = self.pan_keys.axes();
+
+        // Desktop edge-scroll: cursor near an edge pans that way. Gated on a real
+        // hovering cursor with no drag in progress, so it never fires on touch
+        // (no hover) or while orbiting / band-boxing.
+        if self.cursor_in_window && self.lmb_down.is_none() && self.rmb_down.is_none() {
+            if let Some(win) = &self.window {
+                let s = win.inner_size();
+                let (w, h) = (s.width.max(1) as f64, s.height.max(1) as f64);
+                const EDGE: f64 = 22.0;
+                let (cx, cy) = self.cursor;
+                if cx <= EDGE {
+                    rx -= 1.0;
+                } else if cx >= w - EDGE {
+                    rx += 1.0;
+                }
+                if cy <= EDGE {
+                    fy += 1.0;
+                } else if cy >= h - EDGE {
+                    fy -= 1.0;
+                }
+            }
+        }
+
+        // Mobile joystick + elevation slider (window globals; zero on native).
+        let (mx, my, me) = read_pan_input();
+        rx += mx;
+        fy += my;
+        elev += me;
+
+        if rx.abs() + fy.abs() + elev.abs() < 1e-4 {
+            return;
+        }
+        rx = rx.clamp(-1.0, 1.0);
+        fy = fy.clamp(-1.0, 1.0);
+        elev = elev.clamp(-1.0, 1.0);
+
+        // Camera-relative ground axes (from yaw); speed scales with zoom so the
+        // on-screen pan rate feels consistent across distances.
+        let yaw = self.camera.yaw;
+        let forward = Vec3::new(-yaw.sin(), 0.0, -yaw.cos());
+        let right = Vec3::new(yaw.cos(), 0.0, -yaw.sin());
+        let pan_speed = (self.camera.distance * 0.7).clamp(3.0, 60.0);
+        let elev_speed = (self.camera.distance * 0.5).clamp(2.0, 40.0);
+        self.camera.focus += (right * rx + forward * fy) * (pan_speed * dt);
+        self.camera.focus.y += elev * elev_speed * dt;
+
+        // Keep focus in sane bounds so the camera can't drift off forever.
+        self.camera.focus.x = self.camera.focus.x.clamp(-400.0, 400.0);
+        self.camera.focus.y = self.camera.focus.y.clamp(-120.0, 120.0);
+        self.camera.focus.z = self.camera.focus.z.clamp(-400.0, 400.0);
     }
 
     /// XZ centroid of the current selection (the move-direction anchor).
@@ -889,6 +1007,61 @@ impl App {
         }
     }
 
+    /// Keyboard handling. WASD + arrows pan and Q/E change elevation (held; the
+    /// camera applies them each frame). `Shift+A` selects all and `Shift+S`
+    /// stops (so A/S stay free to pan); `C` cycles formation; `Esc` clears.
+    fn on_key(&mut self, event: winit::event::KeyEvent) {
+        use winit::keyboard::{Key, NamedKey};
+        let pressed = event.state == ElementState::Pressed;
+        // One-shot actions fire on the initial press, not on auto-repeat.
+        let first = pressed && !event.repeat;
+        match event.logical_key.as_ref() {
+            Key::Character("w") | Key::Character("W") | Key::Named(NamedKey::ArrowUp) => {
+                self.pan_keys.forward = pressed;
+            }
+            Key::Character("d") | Key::Character("D") | Key::Named(NamedKey::ArrowRight) => {
+                self.pan_keys.right = pressed;
+            }
+            Key::Named(NamedKey::ArrowDown) => self.pan_keys.back = pressed,
+            Key::Named(NamedKey::ArrowLeft) => self.pan_keys.left = pressed,
+            // A/S pan unless Shift turns them into Select All / Stop.
+            Key::Character("a") | Key::Character("A") => {
+                if self.shift_down {
+                    if first {
+                        self.select_all_player();
+                    }
+                    self.pan_keys.left = false;
+                } else {
+                    self.pan_keys.left = pressed;
+                }
+            }
+            Key::Character("s") | Key::Character("S") => {
+                if self.shift_down {
+                    if first {
+                        self.stop_selected();
+                    }
+                    self.pan_keys.back = false;
+                } else {
+                    self.pan_keys.back = pressed;
+                }
+            }
+            Key::Character("e") | Key::Character("E") => self.pan_keys.rise = pressed,
+            Key::Character("q") | Key::Character("Q") => self.pan_keys.fall = pressed,
+            Key::Character("c") | Key::Character("C") => {
+                if first {
+                    self.formation = self.formation.next();
+                    log::info!("formation: {}", self.formation.label());
+                }
+            }
+            Key::Named(NamedKey::Escape) => {
+                if first {
+                    self.selected.clear();
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Tap detection for touch: returns the position on a clean, still,
     /// single-finger tap, so one-finger drags still orbit and pinches zoom.
     fn on_touch_tap(&mut self, phase: TouchPhase, id: u64, x: f64, y: f64) -> Option<(f64, f64)> {
@@ -1043,23 +1216,17 @@ impl ApplicationHandler for App {
                         .on_touch(&mut self.camera, t.phase, t.id, tx, ty);
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } => {
-                use winit::keyboard::{Key, NamedKey};
-                if event.state == ElementState::Pressed {
-                    match event.logical_key.as_ref() {
-                        Key::Character("a") | Key::Character("A") => self.select_all_player(),
-                        Key::Character("s") | Key::Character("S") => self.stop_selected(),
-                        // `C` cycles formations; `F` is reserved for focus-on-
-                        // selection in the design's binding table (design.md §9.5).
-                        Key::Character("c") | Key::Character("C") => {
-                            self.formation = self.formation.next();
-                            log::info!("formation: {}", self.formation.label());
-                        }
-                        Key::Named(NamedKey::Escape) => self.selected.clear(),
-                        _ => {}
-                    }
+            WindowEvent::ModifiersChanged(mods) => {
+                let shift = mods.state().shift_key();
+                if shift != self.shift_down {
+                    self.shift_down = shift;
+                    #[cfg(target_arch = "wasm32")]
+                    show_shift_hint(shift);
                 }
             }
+            WindowEvent::CursorEntered { .. } => self.cursor_in_window = true,
+            WindowEvent::CursorLeft { .. } => self.cursor_in_window = false,
+            WindowEvent::KeyboardInput { event, .. } => self.on_key(event),
             WindowEvent::RedrawRequested => self.redraw(),
             _ => {}
         }
@@ -1348,6 +1515,20 @@ fn wire_dom_controls() {
             let cb = Closure::<dyn FnMut()>::new(move || push_ui(UiCmd::BoxSelectArm(on)));
             let _ = el.add_event_listener_with_callback(event, cb.as_ref().unchecked_ref());
             cb.forget();
+        }
+    }
+}
+
+/// Toggle the "Shift: A = all, S = stop" hint while Shift is held.
+#[cfg(target_arch = "wasm32")]
+fn show_shift_hint(show: bool) {
+    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+        if let Some(el) = doc.get_element_by_id("sol-shift-hint") {
+            if show {
+                let _ = el.remove_attribute("hidden");
+            } else {
+                let _ = el.set_attribute("hidden", "");
+            }
         }
     }
 }

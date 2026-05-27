@@ -99,6 +99,90 @@
         background: #1c4a73;
         border-color: #4f9fe0;
       }
+      /* Shift hint: shown (by the app) while Shift is held on desktop. */
+      #sol-shift-hint {
+        position: fixed;
+        left: 10px;
+        bottom: 58px;
+        z-index: 21;
+        background: rgba(11, 26, 43, 0.92);
+        border: 1px solid #4f9fe0;
+        border-radius: 8px;
+        color: #cfe0f5;
+        font: 600 13px/1.3 system-ui, sans-serif;
+        padding: 8px 10px;
+        pointer-events: none;
+      }
+      #sol-shift-hint[hidden] {
+        display: none;
+      }
+      /* Mobile camera pad: a pan joystick + a spring-to-center elevation slider.
+         Desktop uses WASD / arrows / edge-scroll instead, so the app removes the
+         pad on non-mobile. */
+      #sol-pad {
+        position: fixed;
+        inset: 0;
+        z-index: 20;
+        pointer-events: none;
+      }
+      #sol-joy,
+      #sol-elev {
+        position: fixed;
+        bottom: 24px;
+        pointer-events: auto;
+        touch-action: none;
+        user-select: none;
+        -webkit-user-select: none;
+        background: rgba(11, 26, 43, 0.5);
+        border: 1px solid #2b6cb0;
+      }
+      #sol-joy {
+        right: 24px;
+        width: 120px;
+        height: 120px;
+        border-radius: 50%;
+      }
+      #sol-elev {
+        right: 156px;
+        width: 56px;
+        height: 120px;
+        border-radius: 28px;
+      }
+      #sol-joy-knob,
+      #sol-elev-knob {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        border-radius: 50%;
+        background: rgba(79, 159, 224, 0.85);
+        pointer-events: none;
+      }
+      #sol-joy-knob {
+        width: 52px;
+        height: 52px;
+        margin: -26px 0 0 -26px;
+      }
+      #sol-elev-knob {
+        width: 44px;
+        height: 40px;
+        margin: -20px 0 0 -22px;
+        border-radius: 12px;
+      }
+      .pad-label {
+        position: absolute;
+        left: 0;
+        right: 0;
+        text-align: center;
+        color: #7fa6cc;
+        font: 700 13px/1 system-ui, sans-serif;
+        pointer-events: none;
+      }
+      #sol-elev .pad-up {
+        top: 6px;
+      }
+      #sol-elev .pad-down {
+        bottom: 6px;
+      }
     </style>
     <script>
       // Treat phones and tablets as mobile (including iPadOS, which sends a
@@ -187,5 +271,90 @@
       <button id="sol-stop" type="button">Stop</button>
       <button id="sol-clear" type="button">Clear</button>
     </div>
+    <div id="sol-shift-hint" hidden>Shift: A = Select All, S = Stop</div>
+    <div id="sol-pad">
+      <div id="sol-elev">
+        <div class="pad-label pad-up">UP</div>
+        <div id="sol-elev-knob"></div>
+        <div class="pad-label pad-down">DN</div>
+      </div>
+      <div id="sol-joy"><div id="sol-joy-knob"></div></div>
+    </div>
+    <script>
+      // Mobile camera pad. The joystick pans (right = +X, push up = forward) and
+      // the vertical slider changes elevation (push up = ascend); both spring to
+      // center and write normalized [-1, 1] values to window globals that the
+      // wasm app samples each frame. Desktop uses WASD / arrows / edge-scroll, so
+      // the pad is removed off mobile.
+      (function () {
+        window.__solPanX = 0;
+        window.__solPanY = 0;
+        window.__solElev = 0;
+        var pad = document.getElementById("sol-pad");
+        if (!pad) return;
+        if (!window.__solIsMobile || !window.__solIsMobile()) {
+          pad.remove();
+          return;
+        }
+
+        // A spring-to-center analog control. `apply(nx, ny)` receives the knob
+        // offset normalized to [-1, 1]; `reset` recenters and zeroes output.
+        function analog(el, knob, axis, apply) {
+          if (!el || !knob) return;
+          var id = null;
+          function move(e) {
+            if (e.pointerId !== id) return;
+            var r = el.getBoundingClientRect();
+            var cx = r.left + r.width / 2;
+            var cy = r.top + r.height / 2;
+            var dx = e.clientX - cx;
+            var dy = e.clientY - cy;
+            if (axis === "y") dx = 0;
+            var max = (axis === "y" ? r.height : r.width) * 0.4;
+            var len = Math.hypot(dx, dy) || 1;
+            if (len > max) {
+              dx *= max / len;
+              dy *= max / len;
+            }
+            knob.style.transform = "translate(" + dx + "px," + dy + "px)";
+            apply(dx / max, dy / max);
+            e.preventDefault();
+          }
+          function end(e) {
+            if (e.pointerId !== id) return;
+            id = null;
+            knob.style.transform = "translate(0px,0px)";
+            apply(0, 0);
+          }
+          el.addEventListener("pointerdown", function (e) {
+            id = e.pointerId;
+            el.setPointerCapture(id);
+            move(e);
+            e.preventDefault();
+          });
+          el.addEventListener("pointermove", move);
+          el.addEventListener("pointerup", end);
+          el.addEventListener("pointercancel", end);
+        }
+
+        analog(
+          document.getElementById("sol-joy"),
+          document.getElementById("sol-joy-knob"),
+          "xy",
+          function (nx, ny) {
+            window.__solPanX = nx;
+            window.__solPanY = -ny; // up on screen = forward
+          }
+        );
+        analog(
+          document.getElementById("sol-elev"),
+          document.getElementById("sol-elev-knob"),
+          "y",
+          function (nx, ny) {
+            window.__solElev = -ny; // up = ascend
+          }
+        );
+      })();
+    </script>
   </body>
 </html>

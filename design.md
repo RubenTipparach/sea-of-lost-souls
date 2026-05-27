@@ -684,6 +684,27 @@ back to a grid otherwise; `C` (or the HUD button) cycles Parade / Grid / Line.
 > the input layer must not hard-code mouse assumptions, and **touch is a required
 > test harness** (see [§9.6](#96-mobile-test-harness-input-parity)).
 
+**Prototype bindings (current build).** The table above is the Homeworld-faithful
+target. The prototype wires a smaller, hands-on scheme and will migrate toward
+the target as the order set lands:
+
+| Action | Current binding |
+|---|---|
+| Pan focus (XZ) | **WASD** / arrow keys / screen-edge scroll; mobile **joystick** |
+| Elevation (focus Y) | **`Q`** down / **`E`** up; mobile **elevation slider** |
+| Orbit / zoom | RMB drag / wheel (desktop); one-finger drag / pinch (touch) |
+| Select / band-box | LMB click / LMB-drag; mobile tap / hold **Box Select** + drag |
+| Move (context order) | RMB; mobile tap on empty space |
+| Cycle formation | **`C`** or the **Form:** HUD button |
+| Select all (player) | **`Shift+A`** or the **Select All** button |
+| Stop | **`Shift+S`** or the **Stop** button |
+| Clear selection | **`Esc`** or the **Clear** button |
+
+Because `WASD` pans here, the target table's `W/S/D` order keys (waypoint / stop /
+dock) are not yet bound; `Stop` and `Select All` move to `Shift+S` / `Shift+A`
+(holding `Shift` shows an on-screen hint). `F` (focus on selection) stays
+unbound so it is free for its target role.
+
 ### 9.6 Mobile test harness (input parity)
 
 The target experience is desktop (mouse + keyboard), but **every gameplay

@@ -1959,6 +1959,7 @@ dependencies = [
  "console_log",
  "env_logger",
  "glam",
+ "js-sys",
  "log",
  "pollster",
  "sol-assets",
