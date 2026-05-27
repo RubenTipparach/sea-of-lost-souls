@@ -142,6 +142,10 @@ pub struct Blueprint {
     /// Salvage cargo capacity. Only resourcers carry (> 0); a ship with zero
     /// capacity cannot accept a gather order.
     pub cargo: f32,
+    /// Salvage cost to build this class at the mothership.
+    pub cost: f32,
+    /// Build time in seconds (demo-tuned; shorter than the eventual values).
+    pub build_time: f32,
 }
 
 /// Read-only table of per-class blueprints. Lookups are by key (deterministic);
@@ -252,6 +256,18 @@ impl ShipRegistry {
         ];
         let mut blueprints = HashMap::new();
         for (class, mass, max_speed, accel, turn_rate_deg, crew, radius, max_hull, cargo) in rows {
+            // Build economy (salvage cost, seconds). Demo-tuned for snappy
+            // production; the eventual values live in `ship.json`.
+            let (cost, build_time) = match class {
+                ShipClass::Fighter => (30.0, 4.0),
+                ShipClass::Bomber => (50.0, 6.0),
+                ShipClass::Corvette => (120.0, 8.0),
+                ShipClass::Resourcer => (80.0, 7.0),
+                ShipClass::FrigateGeneral => (300.0, 16.0),
+                ShipClass::FrigateMissile => (340.0, 18.0),
+                ShipClass::CapitalDestroyer => (900.0, 30.0),
+                ShipClass::Carrier => (5000.0, 60.0),
+            };
             blueprints.insert(
                 class,
                 Blueprint {
@@ -264,6 +280,8 @@ impl ShipRegistry {
                     radius,
                     max_hull,
                     cargo,
+                    cost,
+                    build_time,
                 },
             );
         }
@@ -351,6 +369,15 @@ pub struct Gather {
     pub returning: bool,
 }
 
+/// A ship under construction at the mothership: which class, and how much build
+/// time has accrued. The queue is processed front-first in [`World::step`];
+/// salvage is paid up front when the build is enqueued.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BuildItem {
+    pub class: ShipClass,
+    pub progress: f32,
+}
+
 /// One simulated entity. `prev_transform` holds the previous step's transform
 /// so the renderer can interpolate; the sim itself never reads it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -385,6 +412,9 @@ pub enum Command {
     Stop { entity: EntityId },
     /// Send a resourcer to harvest a node (ignored for ships with no cargo).
     Gather { entity: EntityId, node: NodeId },
+    /// Queue a ship of `class` for construction at the mothership; salvage is
+    /// debited immediately (ignored if unaffordable).
+    Build { class: ShipClass },
 }
 
 /// The deterministic simulation world.
@@ -399,6 +429,8 @@ pub struct World {
     pub resource_nodes: Vec<ResourceNode>,
     /// Salvage banked at the mothership (the player's resource pool).
     pub salvage: f32,
+    /// Ships under construction at the mothership (front item builds first).
+    pub build_queue: Vec<BuildItem>,
     pub registry: ShipRegistry,
     pub rng: Rng,
     /// Number of fixed steps taken; part of the determinism checksum.
@@ -416,6 +448,7 @@ impl World {
             entities: Vec::new(),
             resource_nodes: Vec::new(),
             salvage: 0.0,
+            build_queue: Vec::new(),
             registry: ShipRegistry::with_defaults(),
             rng: Rng::new(seed),
             tick: 0,
@@ -545,6 +578,16 @@ impl World {
                             e.order = None;
                             e.patrol = None;
                         }
+                    }
+                }
+                Command::Build { class } => {
+                    let cost = self.registry.get(class).cost;
+                    if cost > 0.0 && self.salvage >= cost {
+                        self.salvage -= cost;
+                        self.build_queue.push(BuildItem {
+                            class,
+                            progress: 0.0,
+                        });
                     }
                 }
             }
@@ -733,6 +776,22 @@ impl World {
             }
         }
 
+        // 5) Production: advance the front build at the mothership; when it
+        // finishes, spawn the ship near the carrier at a spread angle.
+        if let Some(front) = self.build_queue.first_mut() {
+            front.progress += dt;
+        }
+        if let Some(front) = self.build_queue.first().copied() {
+            if front.progress >= self.registry.get(front.class).build_time {
+                self.build_queue.remove(0);
+                let (center, cr) = depot.unwrap_or((Vec3::ZERO, 8.0));
+                // Golden-angle spread so successive builds don't stack.
+                let angle = self.next_id as f32 * 2.399_963;
+                let off = Vec3::new(angle.cos(), 0.0, angle.sin()) * (cr + 5.0);
+                self.spawn_class(front.class, Team::Player, center + off);
+            }
+        }
+
         self.tick += 1;
     }
 
@@ -766,6 +825,10 @@ impl World {
         for n in &self.resource_nodes {
             h = fnv1a(h, n.id.0);
             h = fnv1a(h, n.amount.to_bits());
+        }
+        for b in &self.build_queue {
+            h = fnv1a(h, b.class as u32);
+            h = fnv1a(h, b.progress.to_bits());
         }
         h
     }
@@ -1002,6 +1065,46 @@ mod tests {
             w.checksum()
         }
         assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn build_spends_salvage_and_spawns_a_ship() {
+        let mut w = World::new(4);
+        w.spawn_class(ShipClass::Carrier, Team::Player, Vec3::ZERO);
+        w.salvage = 500.0;
+        let before = w.entities.len();
+        let cost = w.registry.get(ShipClass::Corvette).cost;
+        w.enqueue(Command::Build {
+            class: ShipClass::Corvette,
+        });
+        w.step(TICK_DT);
+        // Paid up front and queued.
+        assert_eq!(w.salvage, 500.0 - cost);
+        assert_eq!(w.build_queue.len(), 1);
+        // Finishes within its build time and spawns one ship.
+        let bt = w.registry.get(ShipClass::Corvette).build_time;
+        for _ in 0..((bt * TICK_HZ as f32) as u32 + 2) {
+            w.step(TICK_DT);
+        }
+        assert!(w.build_queue.is_empty(), "build did not finish");
+        assert_eq!(w.entities.len(), before + 1, "no ship spawned");
+        assert!(w
+            .entities
+            .iter()
+            .any(|e| e.ship.class == ShipClass::Corvette));
+    }
+
+    #[test]
+    fn build_rejected_when_unaffordable() {
+        let mut w = World::new(4);
+        w.spawn_class(ShipClass::Carrier, Team::Player, Vec3::ZERO);
+        w.salvage = 5.0; // far below any cost
+        w.enqueue(Command::Build {
+            class: ShipClass::Fighter,
+        });
+        w.step(TICK_DT);
+        assert!(w.build_queue.is_empty());
+        assert_eq!(w.salvage, 5.0);
     }
 
     #[test]

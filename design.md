@@ -1309,6 +1309,17 @@ Three deliverables, all live on GitHub Pages from the first commit:
   rises. All gather/harvest/deposit state lives in the deterministic sim (node
   amounts and the salvage pool are in the checksum); asteroid positions/amounts
   are seeded so they are identical across peers.
+- **Production (prototype build menu):** a HUD **Build** menu queues ship classes
+  for construction at the mothership. Salvage is debited up front (a `Build`
+  command), the front of the queue accrues build time each fixed step, and on
+  completion the ship spawns next to the carrier at a spread angle. The queue and
+  per-item progress are deterministic sim state (in the checksum); the menu, like
+  all controls, drives the same command path on desktop and touch. This closes
+  the gather -> bank -> build economy loop ([§3](#3-core-loop--roguelike-campaign)).
+- **Faction livery:** hulls are baked neutral grey with a livery mask in the
+  texture alpha; the renderer multiplies a per-instance faction color onto those
+  texels only (player blue, enemy red, resourcers forced yellow), so one hull
+  serves any faction without re-baking.
 - Minimal **egui HUD:** selection list + a stub power/health panel
   ([§10](#10-ui--hud)).
 - *(No combat, no real subsystems yet - movement, selection, camera, and the

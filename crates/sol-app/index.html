@@ -116,6 +116,43 @@
       #sol-shift-hint[hidden] {
         display: none;
       }
+      /* Build menu: a column of class buttons that pops up above the controls. */
+      #sol-build-panel {
+        position: fixed;
+        left: 10px;
+        bottom: 56px;
+        z-index: 22;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      #sol-build-panel[hidden] {
+        display: none;
+      }
+      #sol-build-panel button {
+        appearance: none;
+        border: 1px solid #2b6cb0;
+        border-radius: 8px;
+        background: rgba(11, 26, 43, 0.92);
+        color: #cfe0f5;
+        font: 600 13px/1 system-ui, sans-serif;
+        padding: 9px 12px;
+        text-align: left;
+      }
+      #sol-build-panel button:active {
+        background: #1c4a73;
+      }
+      /* Current-production readout, top-left under the salvage counter. */
+      #sol-build-status {
+        position: fixed;
+        left: 10px;
+        top: 44px;
+        z-index: 21;
+        color: #bcd3ee;
+        font: 600 13px/1 system-ui, sans-serif;
+        text-shadow: 0 1px 2px #000;
+        pointer-events: none;
+      }
       /* Resource readout: banked salvage, top-left. */
       #sol-resources {
         position: fixed;
@@ -279,13 +316,37 @@
       })();
     </script>
     <div id="sol-resources">Salvage: 0</div>
+    <div id="sol-build-status"></div>
+    <div id="sol-build-panel" hidden>
+      <button id="sol-build-fighter" type="button">Fighter (30)</button>
+      <button id="sol-build-bomber" type="button">Bomber (50)</button>
+      <button id="sol-build-corvette" type="button">Corvette (120)</button>
+      <button id="sol-build-resourcer" type="button">Resourcer (80)</button>
+      <button id="sol-build-frigate_general" type="button">Frigate (300)</button>
+      <button id="sol-build-frigate_missile" type="button">Missile Frigate (340)</button>
+      <button id="sol-build-capital_destroyer" type="button">Destroyer (900)</button>
+    </div>
     <div id="sol-controls">
+      <button id="sol-build-toggle" type="button">Build</button>
       <button id="sol-select-all" type="button">Select All</button>
       <button id="sol-box-select" type="button">Box Select</button>
       <button id="sol-formation" type="button">Form: Parade</button>
       <button id="sol-stop" type="button">Stop</button>
       <button id="sol-clear" type="button">Clear</button>
     </div>
+    <script>
+      // Toggle the build menu open/closed (the buttons themselves are wired to
+      // the wasm command queue in Rust).
+      (function () {
+        var t = document.getElementById("sol-build-toggle");
+        var p = document.getElementById("sol-build-panel");
+        if (t && p) {
+          t.addEventListener("click", function () {
+            p.hidden = !p.hidden;
+          });
+        }
+      })();
+    </script>
     <div id="sol-shift-hint" hidden>Shift: A = Select All, S = Stop</div>
     <div id="sol-pad">
       <div id="sol-elev">

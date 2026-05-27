@@ -502,30 +502,54 @@ impl App {
                 }
             }
 
-            // Harvest motes: gold sprites streaming from the node into a resourcer
-            // while it sits in range mining (purely visual).
+            // Dust (purely visual additive motes): fine dust while mining, and a
+            // trailing plume behind a full hauler on the move.
             if let Some(g) = e.gather {
                 carrying_total += g.carrying;
+                let cap = self.world.registry.get(e.ship.class).cargo.max(1.0);
                 if !g.returning {
                     if let Some(n) = self.world.node(g.node) {
                         if (pos - n.pos).length() <= n.radius + r + 3.0 {
                             let surface = n.pos + (pos - n.pos).normalize_or_zero() * n.radius;
-                            for k in 0..8u32 {
+                            for k in 0..10u32 {
                                 let kk = k as f32;
-                                let phase = (self.elapsed * 0.8 + kk * 0.127).fract();
+                                let phase = (self.elapsed * 0.6 + kk * 0.1).fract();
                                 let jit = Vec3::new(
-                                    (self.elapsed * 3.1 + kk).sin(),
-                                    (self.elapsed * 2.7 + kk * 1.7).cos(),
-                                    (self.elapsed * 2.3 + kk * 0.9).sin(),
-                                ) * (0.6 * (1.0 - phase));
+                                    (self.elapsed * 2.1 + kk).sin(),
+                                    (self.elapsed * 1.7 + kk * 1.7).cos() + 0.4,
+                                    (self.elapsed * 1.9 + kk * 0.9).sin(),
+                                ) * (0.5 * (1.0 - phase));
                                 let p = surface.lerp(pos, phase) + jit;
-                                let inten = 0.7 * (1.0 - phase) + 0.15;
+                                let f = (1.0 - phase) * 0.12 + 0.03;
                                 particles.push(StarInstance::new(
                                     p.to_array(),
-                                    [inten, inten * 0.78, inten * 0.32],
-                                    0.18 * (1.0 - phase) + 0.05,
+                                    [f, f * 0.86, f * 0.66],
+                                    0.004 + 0.004 * (1.0 - phase),
                                 ));
                             }
+                        }
+                    }
+                } else if g.carrying > 0.55 * cap {
+                    let v = e.velocity.linear;
+                    let speed = v.length();
+                    if speed > 1.0 {
+                        let back = -v / speed;
+                        for k in 0..7u32 {
+                            let kk = k as f32;
+                            let d = (kk + (self.elapsed * 3.0).fract()) * 0.9;
+                            let jit = Vec3::new(
+                                (self.elapsed * 1.3 + kk * 2.0).sin(),
+                                (self.elapsed * 1.1 + kk).sin() * 0.4,
+                                (self.elapsed * 1.7 + kk * 1.3).cos(),
+                            ) * 0.35;
+                            let p = pos + back * d + jit;
+                            let fade = (1.0 - d / 7.0).clamp(0.0, 1.0);
+                            let f = fade * 0.1 + 0.02;
+                            particles.push(StarInstance::new(
+                                p.to_array(),
+                                [f, f * 0.9, f * 0.72],
+                                0.004 + 0.004 * fade,
+                            ));
                         }
                     }
                 }
@@ -555,9 +579,25 @@ impl App {
             push_rect_outline_px(&mut overlay_lines, rect, [0.55, 0.85, 1.0, 0.9], (vw, vh));
         }
 
-        // Resource HUD readout (web): banked salvage plus what is in transit.
+        // Resource + build HUD readouts (web).
         #[cfg(target_arch = "wasm32")]
-        set_resources(self.world.salvage, carrying_total);
+        {
+            set_resources(self.world.salvage, carrying_total);
+            let status = match self.world.build_queue.first() {
+                Some(b) => {
+                    let bt = self.world.registry.get(b.class).build_time.max(0.001);
+                    let pct = (b.progress / bt * 100.0).clamp(0.0, 100.0) as i32;
+                    format!(
+                        "Building {} {}%  (queue {})",
+                        class_label(b.class),
+                        pct,
+                        self.world.build_queue.len()
+                    )
+                }
+                None => String::new(),
+            };
+            set_build_status(&status);
+        }
         #[cfg(not(target_arch = "wasm32"))]
         let _ = carrying_total;
 
@@ -1256,6 +1296,7 @@ impl App {
                     set_formation_label(self.formation.label());
                 }
                 UiCmd::BoxSelectArm(on) => self.box_select_armed = on,
+                UiCmd::Build(class) => self.world.enqueue(Command::Build { class }),
             }
         }
     }
@@ -1788,6 +1829,8 @@ enum UiCmd {
     /// Mobile: arm (true) / disarm (false) the band-box drag while the button
     /// is held.
     BoxSelectArm(bool),
+    /// Queue a ship of this class for construction at the mothership.
+    Build(ShipClass),
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1819,6 +1862,22 @@ fn wire_dom_controls() {
             cb.forget();
         }
     }
+    // Build-menu buttons: each queues a ship class for construction.
+    for (id, class) in [
+        ("sol-build-fighter", ShipClass::Fighter),
+        ("sol-build-bomber", ShipClass::Bomber),
+        ("sol-build-corvette", ShipClass::Corvette),
+        ("sol-build-resourcer", ShipClass::Resourcer),
+        ("sol-build-frigate_general", ShipClass::FrigateGeneral),
+        ("sol-build-frigate_missile", ShipClass::FrigateMissile),
+        ("sol-build-capital_destroyer", ShipClass::CapitalDestroyer),
+    ] {
+        if let Some(el) = doc.get_element_by_id(id) {
+            let cb = Closure::<dyn FnMut()>::new(move || push_ui(UiCmd::Build(class)));
+            let _ = el.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref());
+            cb.forget();
+        }
+    }
     // Box-select is a press-and-hold: arm on pointer down, disarm on release
     // (or cancel/leave), so a finger drag on the canvas draws the band box.
     if let Some(el) = doc.get_element_by_id("sol-box-select") {
@@ -1845,6 +1904,31 @@ fn show_shift_hint(show: bool) {
             } else {
                 let _ = el.set_attribute("hidden", "");
             }
+        }
+    }
+}
+
+/// Short display label for a ship class (HUD).
+#[cfg(target_arch = "wasm32")]
+fn class_label(class: ShipClass) -> &'static str {
+    match class {
+        ShipClass::Fighter => "Fighter",
+        ShipClass::Bomber => "Bomber",
+        ShipClass::Corvette => "Corvette",
+        ShipClass::Resourcer => "Resourcer",
+        ShipClass::FrigateGeneral => "Frigate",
+        ShipClass::FrigateMissile => "Missile Frigate",
+        ShipClass::CapitalDestroyer => "Destroyer",
+        ShipClass::Carrier => "Carrier",
+    }
+}
+
+/// Update the build-queue HUD readout (current build + progress + queue depth).
+#[cfg(target_arch = "wasm32")]
+fn set_build_status(text: &str) {
+    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+        if let Some(el) = doc.get_element_by_id("sol-build-status") {
+            el.set_text_content(Some(text));
         }
     }
 }
