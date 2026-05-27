@@ -285,7 +285,8 @@ impl App {
             .map(|e| {
                 let pos = e.prev_transform.pos.lerp(e.transform.pos, alpha);
                 let rot = e.prev_transform.rot.slerp(e.transform.rot, alpha);
-                MeshInstance::new(Mat4::from_rotation_translation(rot, pos))
+                let scale = Vec3::splat(class_scale(e.ship.class));
+                MeshInstance::new(Mat4::from_scale_rotation_translation(scale, rot, pos))
             })
             .collect();
 
@@ -365,6 +366,22 @@ pub fn run() {
 /// Spawn a small starting fleet so the fixed-step sim and interpolation have
 /// something to drive. All ships share the placeholder mesh for now (per-class
 /// meshes land in Stage 3/4); only their positions and classes differ.
+/// Per-class display scale (visual only; every ship shares the interceptor-
+/// sized base hull for now). Fighters read small, capital ships large, until
+/// each class gets its own authored hull.
+fn class_scale(class: ShipClass) -> f32 {
+    match class {
+        ShipClass::Fighter => 0.4,
+        ShipClass::Bomber => 0.6,
+        ShipClass::Corvette => 0.9,
+        ShipClass::Resourcer => 1.0,
+        ShipClass::FrigateGeneral => 1.7,
+        ShipClass::FrigateMissile => 1.8,
+        ShipClass::CapitalDestroyer => 2.4,
+        ShipClass::Carrier => 3.2,
+    }
+}
+
 fn spawn_demo_fleet(world: &mut World) {
     // Stationary core: the carrier and a few escorts holding formation.
     world.spawn_class(ShipClass::Carrier, Team::Player, Vec3::ZERO);
