@@ -490,7 +490,7 @@ impl Renderer {
             wgpu::PrimitiveTopology::TriangleList,
             false,
             wgpu::CompareFunction::Always,
-            "fs_nebula",
+            "fs_main",
         );
         let points_near_pipeline = bg_pipeline(
             &device,

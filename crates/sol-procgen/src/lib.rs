@@ -91,9 +91,12 @@ pub fn generate_background(seed: u64, radius: f32) -> Background {
 
     let base = Vec3::new(0.012, 0.014, 0.028);
 
-    // UV sphere tessellation.
-    let rings = 48usize; // latitude bands
-    let sectors = 96usize; // longitude steps
+    // UV sphere tessellation. Nebula detail is carried by REAL per-vertex colors
+    // (no shader noise), so higher frequency means more vertices: this density is
+    // chosen to resolve the fine cloud field sampled in `nebula_color` without
+    // aliasing. Bump these (and the noise frequency) together for finer clouds.
+    let rings = 128usize; // latitude bands
+    let sectors = 256usize; // longitude steps
     let mut nebula_positions = Vec::new();
     let mut nebula_colors = Vec::new();
     for i in 0..=rings {
@@ -189,15 +192,67 @@ pub fn generate_resource_field(seed: u64, count: usize) -> Vec<ResourceSite> {
         .collect()
 }
 
+/// Per-vertex nebula color: a dark base + vertical gradient, the seeded lobes
+/// broken up into filaments by a real noise field, and faint cloudiness
+/// everywhere. ALL detail lives in this per-vertex value (the shader just
+/// interpolates it), so finer clouds come from more vertices + higher noise
+/// frequency, not from a fragment-shader effect.
 fn nebula_color(dir: Vec3, base: Vec3, lobes: &[Lobe]) -> Vec3 {
     let mut c = base;
     // A gentle vertical gradient (a touch lighter "up").
     c += Vec3::new(0.006, 0.008, 0.014) * (dir.y * 0.5 + 0.5);
+
+    // Cloud field: broad structure + finer filaments. Frequencies are kept under
+    // the vertex Nyquist limit for the tessellation above so it doesn't alias.
+    let broad = fbm3(dir * 1.7 + Vec3::splat(11.0));
+    let fine = fbm3(dir * 4.5 + Vec3::splat(37.0));
+    let cloud = (0.45 * broad + 0.55 * fine).clamp(0.0, 1.0);
+
     for lobe in lobes {
         let d = dir.dot(lobe.dir).clamp(-1.0, 1.0);
-        // Soft falloff from the lobe center (d near 1).
+        // Soft falloff from the lobe center (d near 1), textured by the cloud
+        // field so each lobe reads as wispy filaments rather than a smooth blob.
         let w = (-(1.0 - d) * lobe.tightness).exp();
-        c += lobe.color * w;
+        c += lobe.color * w * (0.2 + 1.6 * cloud);
     }
+
+    // A little standalone nebulosity in the densest parts of the cloud field.
+    c += Vec3::new(0.05, 0.05, 0.075) * (cloud * cloud * 0.5);
     c.clamp(Vec3::ZERO, Vec3::splat(1.0))
+}
+
+/// Hash an integer lattice point to [0, 1).
+fn hash3(p: Vec3) -> f32 {
+    let h = p.dot(Vec3::new(127.1, 311.7, 74.7));
+    (h.sin() * 43758.547).fract().abs()
+}
+
+/// Trilinearly interpolated 3D value noise in [0, 1].
+fn vnoise3(p: Vec3) -> f32 {
+    let i = p.floor();
+    let f = p - i;
+    // Smoothstep weights.
+    let u = f * f * (3.0 - 2.0 * f);
+    let mix = |a: f32, b: f32, t: f32| a + (b - a) * t;
+    let corner = |dx: f32, dy: f32, dz: f32| hash3(i + Vec3::new(dx, dy, dz));
+    let x00 = mix(corner(0.0, 0.0, 0.0), corner(1.0, 0.0, 0.0), u.x);
+    let x10 = mix(corner(0.0, 1.0, 0.0), corner(1.0, 1.0, 0.0), u.x);
+    let x01 = mix(corner(0.0, 0.0, 1.0), corner(1.0, 0.0, 1.0), u.x);
+    let x11 = mix(corner(0.0, 1.0, 1.0), corner(1.0, 1.0, 1.0), u.x);
+    let y0 = mix(x00, x10, u.y);
+    let y1 = mix(x01, x11, u.y);
+    mix(y0, y1, u.z)
+}
+
+/// Fractal value noise (3 octaves), normalized to [0, 1].
+fn fbm3(p: Vec3) -> f32 {
+    let (mut f, mut amp, mut norm) = (0.0, 0.5, 0.0);
+    let mut q = p;
+    for _ in 0..3 {
+        f += amp * vnoise3(q);
+        norm += amp;
+        q *= 2.0;
+        amp *= 0.5;
+    }
+    f / norm
 }
