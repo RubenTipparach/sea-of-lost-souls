@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use glam::{Mat4, Vec3};
 use sol_render::{CpuMesh, GpuMesh, MeshInstance, OrbitCamera, RenderOutcome, Renderer, Vertex};
-use sol_sim::{Command, ShipClass, Team, World};
+use sol_sim::{Patrol, ShipClass, Team, World};
 use web_time::Instant;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
@@ -366,25 +366,33 @@ pub fn run() {
 /// something to drive. All ships share the placeholder mesh for now (per-class
 /// meshes land in Stage 3/4); only their positions and classes differ.
 fn spawn_demo_fleet(world: &mut World) {
+    // Stationary core: the carrier and a few escorts holding formation.
     world.spawn_class(ShipClass::Carrier, Team::Player, Vec3::ZERO);
-    let formation = [
+    let core = [
         (ShipClass::FrigateGeneral, Vec3::new(-9.0, 0.0, 7.0)),
         (ShipClass::Corvette, Vec3::new(9.0, 0.0, 7.0)),
         (ShipClass::Resourcer, Vec3::new(0.0, 0.0, 11.0)),
-        (ShipClass::Fighter, Vec3::new(-4.0, 2.5, -7.0)),
-        (ShipClass::Fighter, Vec3::new(4.0, 2.5, -7.0)),
         (ShipClass::Bomber, Vec3::new(0.0, -2.5, -9.0)),
     ];
-    for (class, pos) in formation {
+    for (class, pos) in core {
         world.spawn_class(class, Team::Player, pos);
     }
-    // A neutral scout drifting slowly, so the fixed step + interpolation are
-    // visibly doing something before move orders (Stage 7) exist.
-    let scout = world.spawn_class(ShipClass::Fighter, Team::Neutral, Vec3::new(-16.0, 0.0, -2.0));
-    world.enqueue(Command::SetVelocity {
-        entity: scout,
-        linear: Vec3::new(1.2, 0.0, 0.0),
-    });
+    // A flight of fighters patrolling a circle around the fleet.
+    const PATROL: u32 = 5;
+    for k in 0..PATROL {
+        let angle = (k as f32 / PATROL as f32) * std::f32::consts::TAU;
+        world.spawn_patrol(
+            ShipClass::Fighter,
+            Team::Player,
+            Patrol {
+                center: Vec3::ZERO,
+                radius: 20.0,
+                height: 2.0,
+                angular_speed: 0.35,
+                angle,
+            },
+        );
+    }
 }
 
 /// Load the test interceptor mesh, preferring the authored GLB and falling back

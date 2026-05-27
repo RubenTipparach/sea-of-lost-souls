@@ -192,6 +192,36 @@ pub struct Ship {
     pub mass: f32,
 }
 
+/// A circular patrol path in the XZ plane. Each step advances `angle` by
+/// `angular_speed * dt` and snaps the entity onto the circle, facing its
+/// direction of travel. Deterministic (a pure function of accumulated dt), so
+/// it is safe to run inside the sim.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Patrol {
+    pub center: Vec3,
+    pub radius: f32,
+    pub height: f32,
+    pub angular_speed: f32,
+    pub angle: f32,
+}
+
+impl Patrol {
+    /// Current point on the circle.
+    pub fn point(&self) -> Vec3 {
+        self.center
+            + Vec3::new(
+                self.radius * self.angle.cos(),
+                self.height,
+                self.radius * self.angle.sin(),
+            )
+    }
+
+    /// Unit tangent (direction of travel) at the current angle.
+    pub fn heading(&self) -> Vec3 {
+        Vec3::new(-self.angle.sin(), 0.0, self.angle.cos())
+    }
+}
+
 /// One simulated entity. `prev_transform` holds the previous step's transform
 /// so the renderer can interpolate; the sim itself never reads it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -201,6 +231,8 @@ pub struct Entity {
     pub prev_transform: Transform,
     pub velocity: Velocity,
     pub ship: Ship,
+    /// Optional circular patrol; when set, the step drives the transform.
+    pub patrol: Option<Patrol>,
 }
 
 /// A player/AI order. Orders are queued and applied at fixed-step boundaries
@@ -255,6 +287,7 @@ impl World {
             prev_transform: transform,
             velocity: Velocity::default(),
             ship,
+            patrol: None,
         });
         id
     }
@@ -270,6 +303,18 @@ impl World {
                 rot: Quat::IDENTITY,
             },
         )
+    }
+
+    /// Spawn a ship that follows a circular `patrol` around a point, starting on
+    /// the circle and facing its direction of travel.
+    pub fn spawn_patrol(&mut self, class: ShipClass, team: Team, patrol: Patrol) -> EntityId {
+        let id = self.spawn_class(class, team, patrol.point());
+        if let Some(e) = self.entities.last_mut() {
+            e.patrol = Some(patrol);
+            e.transform.rot = Quat::from_rotation_arc(Vec3::Z, patrol.heading());
+            e.prev_transform = e.transform;
+        }
+        id
     }
 
     /// Queue an order to be applied at the next [`World::step`].
@@ -308,10 +353,22 @@ impl World {
             }
         }
 
-        // 2) Snapshot for render interpolation, then integrate (explicit Euler).
+        // 2) Snapshot for render interpolation, then advance: patrol entities
+        // follow their circle; the rest integrate their velocity (Euler).
         for e in &mut self.entities {
             e.prev_transform = e.transform;
-            e.transform.pos += e.velocity.linear * dt;
+            match e.patrol.as_mut() {
+                Some(p) => {
+                    p.angle += p.angular_speed * dt;
+                    let pos = p.point();
+                    let heading = p.heading();
+                    e.transform.pos = pos;
+                    e.transform.rot = Quat::from_rotation_arc(Vec3::Z, heading);
+                }
+                None => {
+                    e.transform.pos += e.velocity.linear * dt;
+                }
+            }
         }
 
         self.tick += 1;
@@ -450,6 +507,28 @@ mod tests {
         }
         assert_eq!(ShipClass::Fighter.crew_kind(), CrewKind::Pilots);
         assert_eq!(ShipClass::Carrier.crew_kind(), CrewKind::Ops);
+    }
+
+    #[test]
+    fn patrol_orbits_at_constant_radius() {
+        let mut w = World::new(3);
+        let id = w.spawn_patrol(
+            ShipClass::Fighter,
+            Team::Player,
+            Patrol {
+                center: Vec3::ZERO,
+                radius: 10.0,
+                height: 0.0,
+                angular_speed: 1.0,
+                angle: 0.0,
+            },
+        );
+        for _ in 0..200 {
+            w.step(TICK_DT);
+        }
+        let p = w.entity(id).unwrap().transform.pos;
+        let r = (p.x * p.x + p.z * p.z).sqrt();
+        assert!((r - 10.0).abs() < 1e-3, "patrol radius drifted: {r}");
     }
 
     #[test]
