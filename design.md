@@ -752,13 +752,17 @@ nearest player ship inside its sensor range, and advances on the mothership when
 it has no direct contact. **Fog of war** is enforced in the view: an enemy is
 drawn only while inside some player ship's sensor sphere (a local-UI computation
 that never feeds the sim). The **Sensors-manager view** (`V` / the **Sensors**
-button) dims the 3D scene with a full-screen quad drawn beneath the world-space
-gizmos (`Renderer::set_scene_dim`), draws a tactical grid and a wireframe sensor
-sphere around each player ship, and collapses ships into **blips** the way the
-Homeworld sensors manager does: strike craft and frigates become a team-colored
-blip sized by class (a ring at altitude plus a pole to the plane), while the
-**mothership and capital ships keep their model** as readable anchors. **Weapons
-are deliberately absent for now**: ballistics, bombs, and
+button) pulls the camera out to a battlefield overview (restoring the prior
+framing on exit), dims the 3D scene with a full-screen quad drawn beneath the
+world-space gizmos (`Renderer::set_scene_dim`), draws a tactical grid, and shows
+each player ship's sensor range as a translucent **sensor-field sphere**
+(`Renderer::set_sensor_spheres`). Those spheres are rendered inverted (front
+faces culled, far shell shown) with depth write, so overlapping ranges merge into
+one solid translucent color instead of stacking alpha. Ships collapse into
+**blips** the way the Homeworld sensors manager does: strike craft and frigates
+become a team-colored blip sized by class (a ring at altitude plus a pole to the
+plane), while the **mothership and capital ships keep their model** as readable
+anchors. **Weapons are deliberately absent for now**: ballistics, bombs, and
 missiles are the next slice (see [§6.8](#68-ballistics--projectiles)); hull,
 teams, and sensor range are already in place as the foundation.
 

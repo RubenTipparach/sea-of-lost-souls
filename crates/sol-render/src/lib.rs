@@ -145,6 +145,70 @@ impl StarInstance {
     }
 }
 
+/// One translucent "sensor field" sphere instance for the sensors-manager view:
+/// a world-space center + radius and an RGBA fill. Drawn inverted with depth
+/// write, so overlapping spheres merge into one solid color (see `sphere.wgsl`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct SensorSphere {
+    pub center_radius: [f32; 4],
+    pub color: [f32; 4],
+}
+
+impl SensorSphere {
+    pub fn new(center: Vec3, radius: f32, color: [f32; 4]) -> Self {
+        Self {
+            center_radius: [center.x, center.y, center.z, radius],
+            color,
+        }
+    }
+
+    fn layout() -> wgpu::VertexBufferLayout<'static> {
+        const ATTRS: [wgpu::VertexAttribute; 2] =
+            wgpu::vertex_attr_array![1 => Float32x4, 2 => Float32x4];
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<SensorSphere>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &ATTRS,
+        }
+    }
+}
+
+/// Per-vertex layout for the unit sphere mesh (position only); the instance
+/// buffer (`SensorSphere`) supplies center, radius, and color.
+fn sphere_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
+    const ATTRS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x3];
+    wgpu::VertexBufferLayout {
+        array_stride: (std::mem::size_of::<f32>() * 3) as wgpu::BufferAddress,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &ATTRS,
+    }
+}
+
+/// A unit UV sphere centered at the origin: positions plus CCW-outward indices.
+/// (No normals: the sensor field uses a flat fill.)
+fn unit_sphere(stacks: u32, slices: u32) -> (Vec<[f32; 3]>, Vec<u32>) {
+    let row = slices + 1;
+    let mut verts = Vec::with_capacity(((stacks + 1) * row) as usize);
+    for i in 0..=stacks {
+        let phi = i as f32 / stacks as f32 * std::f32::consts::PI;
+        let (sp, cp) = phi.sin_cos();
+        for j in 0..=slices {
+            let theta = j as f32 / slices as f32 * std::f32::consts::TAU;
+            let (st, ct) = theta.sin_cos();
+            verts.push([sp * ct, cp, sp * st]);
+        }
+    }
+    let mut indices = Vec::with_capacity((stacks * slices * 6) as usize);
+    for i in 0..stacks {
+        for j in 0..slices {
+            let a = i * row + j;
+            indices.extend_from_slice(&[a, a + 1, a + row, a + 1, a + row + 1, a + row]);
+        }
+    }
+    (verts, indices)
+}
+
 /// A screen-space HUD vertex: clip-space (NDC) 2D position + RGBA color. Used
 /// for the band-selection box and health bars (projected to NDC on the CPU and
 /// alpha-blended over the scene). Shared by the overlay line and triangle
@@ -281,6 +345,13 @@ pub struct Renderer {
     /// Full-screen dim quad for sensors-manager view, drawn over the 3D scene
     /// but under the gizmo lines so sensor rings stay bright. Empty = no dim.
     scene_dim: DynamicBuffer,
+    /// Inverted translucent "sensor field" spheres (sensors-manager view). The
+    /// unit sphere mesh is instanced per ship; depth write merges overlaps.
+    sphere_pipeline: wgpu::RenderPipeline,
+    sphere_vbuf: wgpu::Buffer,
+    sphere_ibuf: wgpu::Buffer,
+    sphere_index_count: u32,
+    sensor_spheres: DynamicBuffer,
 
     /// Reusable per-frame instance buffer (grown as needed).
     instance_buffer: wgpu::Buffer,
@@ -599,11 +670,81 @@ impl Renderer {
             wgpu::PrimitiveTopology::LineList,
         );
 
+        // Sensor-field spheres: inverted (front-culled) translucent shells with
+        // depth write, so overlapping spheres merge into one solid color.
+        let sphere_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("sphere shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../../shaders/sphere.wgsl").into()),
+        });
+        let alpha_over = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::SrcAlpha,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        };
+        let sphere_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("sensor sphere pipeline"),
+            layout: Some(&bg_layout),
+            vertex: wgpu::VertexState {
+                module: &sphere_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[sphere_vertex_layout(), SensorSphere::layout()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &sphere_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState {
+                        color: alpha_over,
+                        alpha: alpha_over,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                // Cull the near (front) hemisphere so the far interior shell shows.
+                cull_mode: Some(wgpu::Face::Front),
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                // Write depth so only the nearest shell survives per pixel (no
+                // stacking), and test against the scene so ships occlude the field.
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let (sphere_verts, sphere_indices) = unit_sphere(20, 28);
+        let sphere_vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("sphere.vbuf"),
+            contents: bytemuck::cast_slice(&sphere_verts),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let sphere_ibuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("sphere.ibuf"),
+            contents: bytemuck::cast_slice(&sphere_indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let sphere_index_count = sphere_indices.len() as u32;
+
         let gizmo_lines = DynamicBuffer::new(&device, "gizmo lines", 4096);
         let particles = DynamicBuffer::new(&device, "particles", 4096);
         let overlay_tris = DynamicBuffer::new(&device, "overlay tris", 4096);
         let overlay_lines = DynamicBuffer::new(&device, "overlay lines", 1024);
         let scene_dim = DynamicBuffer::new(&device, "scene dim", 256);
+        let sensor_spheres = DynamicBuffer::new(&device, "sensor spheres", 256);
 
         let instance_capacity = 256;
         let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -636,6 +777,11 @@ impl Renderer {
             overlay_tris,
             overlay_lines,
             scene_dim,
+            sphere_pipeline,
+            sphere_vbuf,
+            sphere_ibuf,
+            sphere_index_count,
+            sensor_spheres,
             instance_buffer,
             instance_capacity,
         })
@@ -841,6 +987,14 @@ impl Renderer {
             .upload(&self.device, &self.queue, "scene dim", verts);
     }
 
+    /// Upload the sensors-manager "sensor field" spheres (one per ship), drawn as
+    /// inverted translucent shells. Pass empty to clear. Call before
+    /// `render_groups`.
+    pub fn set_sensor_spheres(&mut self, spheres: &[SensorSphere]) {
+        self.sensor_spheres
+            .upload(&self.device, &self.queue, "sensor spheres", spheres);
+    }
+
     /// Draw several mesh groups in one pass: each group is a mesh plus the
     /// instances drawn with it, so the whole fleet renders with a single clear.
     /// Groups share one instance buffer via contiguous per-group ranges.
@@ -977,6 +1131,18 @@ impl Renderer {
                 pass.set_pipeline(&self.overlay_tri_pipeline);
                 pass.set_vertex_buffer(0, self.scene_dim.buffer.slice(..));
                 pass.draw(0..self.scene_dim.count, 0..1);
+            }
+
+            // Sensor-field spheres: inverted translucent shells over the dimmed
+            // scene, beneath the gizmo blips. One instance per ship; depth write
+            // merges overlaps into one solid color.
+            if self.sensor_spheres.count > 0 {
+                pass.set_pipeline(&self.sphere_pipeline);
+                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                pass.set_vertex_buffer(0, self.sphere_vbuf.slice(..));
+                pass.set_vertex_buffer(1, self.sensor_spheres.buffer.slice(..));
+                pass.set_index_buffer(self.sphere_ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..self.sphere_index_count, 0, 0..self.sensor_spheres.count);
             }
 
             // World-space selection gizmos on top of the ships (camera-transformed

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use glam::{EulerRot, Mat4, Quat, Vec3, Vec4};
 use sol_render::{
     BgVertex, CpuMesh, CpuTexture, GpuMesh, MeshInstance, OrbitCamera, OverlayVertex,
-    RenderOutcome, Renderer, StarInstance, Vertex,
+    RenderOutcome, Renderer, SensorSphere, StarInstance, Vertex,
 };
 #[cfg(target_arch = "wasm32")]
 use sol_sim::CrewKind;
@@ -58,11 +58,20 @@ use winit::window::{Window, WindowId};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
-/// Min/max orbit distance (dolly clamp).
+/// Min/max orbit distance (dolly clamp). The ceiling is high enough to pull back
+/// to the sensors-manager battlefield overview.
 const MIN_DISTANCE: f32 = 1.5;
-const MAX_DISTANCE: f32 = 80.0;
+const MAX_DISTANCE: f32 = 400.0;
 /// Pitch clamp to avoid gimbal flip at the poles.
 const PITCH_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.05;
+
+/// Sensors-manager battlefield framing: pull the camera way out and tilt toward
+/// a top-down view so the whole engagement reads at once.
+const SENSORS_VIEW_DISTANCE: f32 = 300.0;
+const SENSORS_VIEW_PITCH: f32 = 1.15;
+/// Sensor-field sphere fill (RGBA). A low alpha keeps it a slight, solid-reading
+/// translucent volume; depth write means overlaps do not stack.
+const SENSOR_FIELD_COLOR: [f32; 4] = [0.28, 0.58, 1.0, 0.16];
 
 /// Build-overlay turntable: default pitch, auto-spin rate (rad/s), and the idle
 /// delay (s) after a manual drag before the spin resumes and the pitch eases
@@ -248,9 +257,12 @@ struct App {
     /// frame (orbit/zoom still work). Cleared the moment the player pans. UI
     /// state only; never enters the sim.
     focus_target: Option<EntityId>,
-    /// Sensors-manager view: dims the scene and draws the tactical grid + sensor
-    /// spheres. Local UI only.
+    /// Sensors-manager view: dims the scene, pulls back to a battlefield view,
+    /// and draws the tactical grid + sensor spheres. Local UI only.
     sensors_open: bool,
+    /// Camera framing (distance, pitch) saved on entering sensors mode, restored
+    /// on exit so the player returns to their prior zoom.
+    sensors_saved_view: Option<(f32, f32)>,
     /// Single-player pause: when set, the fixed-step sim is not advanced (the
     /// camera and UI still work). App-side only; a lockstep-synced pause is a
     /// future multiplayer concern.
@@ -308,6 +320,7 @@ impl App {
             preview_idle: PREVIEW_RETURN_DELAY,
             focus_target: None,
             sensors_open: false,
+            sensors_saved_view: None,
             paused: false,
             select_box: None,
             box_select_armed: false,
@@ -506,8 +519,9 @@ impl App {
             let gfx = self.graphics.as_mut().unwrap();
             gfx.renderer.set_overlays(&[], &[], &[]);
             gfx.renderer.set_particles(&[]);
-            // Clear any sensors-mode dim so it can't darken the build preview.
+            // Clear any sensors-mode overlays so they can't bleed onto the preview.
             gfx.renderer.set_scene_dim([0.0, 0.0, 0.0, 0.0]);
+            gfx.renderer.set_sensor_spheres(&[]);
             let groups: Vec<(&GpuMesh, &[MeshInstance])> = gfx
                 .meshes
                 .get(&class)
@@ -745,11 +759,12 @@ impl App {
             push_rect_outline_px(&mut overlay_lines, rect, [0.55, 0.85, 1.0, 0.9], (vw, vh));
         }
 
-        // Sensors-manager overlay: a tactical grid, a sensor sphere around each
-        // player ship, and a team-colored blip (sized by class) for every visible
-        // ship whose model is hidden. The mothership and capitals keep their model
-        // as anchors. The scene is dimmed (at submit, below) so these read clearly.
-        // Local UI only; fog of war matches the main loop's visibility rule.
+        // Sensors-manager overlay: a tactical grid, a translucent sensor-field
+        // sphere around each player ship, and a team-colored blip (sized by class)
+        // for every visible ship whose model is hidden. The mothership and capitals
+        // keep their model as anchors. The scene is dimmed (at submit, below) so
+        // these read clearly. Local UI only; fog of war matches the main loop.
+        let mut sensor_spheres: Vec<SensorSphere> = Vec::new();
         if sensors {
             push_sensor_grid(
                 &mut gizmo_lines,
@@ -765,7 +780,7 @@ impl App {
                 let pos = e.prev_transform.pos.lerp(e.transform.pos, alpha);
                 if e.ship.team == Team::Player {
                     let sr = self.world.registry.get(e.ship.class).sensor_range;
-                    push_sensor_sphere(&mut gizmo_lines, pos, sr, [0.2, 0.6, 0.95]);
+                    sensor_spheres.push(SensorSphere::new(pos, sr, SENSOR_FIELD_COLOR));
                 }
                 if !sensors_shows_model(e.ship.class) {
                     push_blip(
@@ -805,12 +820,13 @@ impl App {
         gfx.renderer
             .set_overlays(&gizmo_lines, &overlay_tris, &overlay_lines);
         gfx.renderer.set_particles(&particles);
-        // Dim the 3D scene in sensors mode (the gizmo grid/spheres stay bright).
+        // Dim the 3D scene in sensors mode (the grid/spheres/blips stay bright).
         gfx.renderer.set_scene_dim(if sensors {
             [0.0, 0.01, 0.05, 0.62]
         } else {
             [0.0, 0.0, 0.0, 0.0]
         });
+        gfx.renderer.set_sensor_spheres(&sensor_spheres);
         let mut render_groups: Vec<(&GpuMesh, &[MeshInstance])> = groups
             .iter()
             .filter_map(|(class, insts)| gfx.meshes.get(class).map(|m| (m, insts.as_slice())))
@@ -984,39 +1000,6 @@ fn push_circle(v: &mut Vec<BgVertex>, center: Vec3, radius: f32, color: [f32; 3]
         push_line(v, prev, p, color);
         prev = p;
     }
-}
-
-/// World-space ring of radius `radius` in the plane spanned by basis vectors
-/// `a` and `b` (unit length), as `segments` line segments.
-fn push_ring(
-    v: &mut Vec<BgVertex>,
-    center: Vec3,
-    radius: f32,
-    a: Vec3,
-    b: Vec3,
-    color: [f32; 3],
-    segments: usize,
-) {
-    let mut prev = center + a * radius;
-    for k in 1..=segments {
-        let t = k as f32 / segments as f32 * std::f32::consts::TAU;
-        let p = center + (a * t.cos() + b * t.sin()) * radius;
-        push_line(v, prev, p, color);
-        prev = p;
-    }
-}
-
-/// Wireframe "sensor sphere": three great circles plus two latitude rings, which
-/// is enough to read as a shaded sphere for the sensors-manager range display.
-fn push_sensor_sphere(v: &mut Vec<BgVertex>, center: Vec3, radius: f32, color: [f32; 3]) {
-    const SEG: usize = 28;
-    push_ring(v, center, radius, Vec3::X, Vec3::Z, color, SEG); // equator
-    push_ring(v, center, radius, Vec3::X, Vec3::Y, color, SEG);
-    push_ring(v, center, radius, Vec3::Y, Vec3::Z, color, SEG);
-    let rr = radius * 0.866; // cos(30 deg)
-    let yo = radius * 0.5;
-    push_ring(v, center + Vec3::Y * yo, rr, Vec3::X, Vec3::Z, color, SEG);
-    push_ring(v, center - Vec3::Y * yo, rr, Vec3::X, Vec3::Z, color, SEG);
 }
 
 /// Tactical "blip" for a ship in the sensors view: a ring at the ship's altitude
@@ -1543,9 +1526,18 @@ impl App {
     }
 
     /// Toggle the sensors-manager view (dimmed scene + tactical grid + sensor
-    /// spheres). Local UI only.
+    /// spheres) and pull the camera out to a battlefield overview, restoring the
+    /// prior framing on exit. Local UI only.
     fn toggle_sensors(&mut self) {
         self.sensors_open = !self.sensors_open;
+        if self.sensors_open {
+            self.sensors_saved_view = Some((self.camera.distance, self.camera.pitch));
+            self.camera.distance = SENSORS_VIEW_DISTANCE;
+            self.camera.pitch = SENSORS_VIEW_PITCH;
+        } else if let Some((distance, pitch)) = self.sensors_saved_view.take() {
+            self.camera.distance = distance;
+            self.camera.pitch = pitch;
+        }
         #[cfg(target_arch = "wasm32")]
         set_sensors_ui(self.sensors_open);
     }
