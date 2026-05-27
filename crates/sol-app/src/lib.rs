@@ -584,6 +584,7 @@ impl App {
                 .map(|e| e.id)
                 .collect()
         };
+        let sensors = self.sensors_open;
         for e in &self.world.entities {
             // Fog of war: skip enemies that no player sensor currently sees.
             if e.ship.team == Team::Enemy && !detected.contains(&e.id) {
@@ -597,10 +598,14 @@ impl App {
             // The hull's livery band is tinted by this faction color; selection
             // is shown by the ground gizmo + bars, not a hull tint.
             let livery = livery_color(e.ship.class, e.ship.team);
-            groups
-                .entry(e.ship.class)
-                .or_default()
-                .push(MeshInstance::with_tint(model, livery));
+            // In sensors mode, small/medium ships collapse into blips (drawn in the
+            // sensors overlay below); only the mothership and capitals keep a model.
+            if !sensors || sensors_shows_model(e.ship.class) {
+                groups
+                    .entry(e.ship.class)
+                    .or_default()
+                    .push(MeshInstance::with_tint(model, livery));
+            }
 
             let r = self.world.registry.get(e.ship.class).radius;
 
@@ -740,10 +745,11 @@ impl App {
             push_rect_outline_px(&mut overlay_lines, rect, [0.55, 0.85, 1.0, 0.9], (vw, vh));
         }
 
-        // Sensors-manager overlay: a tactical grid plus a sensor sphere around
-        // each player ship, with detected enemies flagged by a ground blip. The
-        // scene is dimmed (at submit, below) so these read clearly. Local UI only.
-        let sensors = self.sensors_open;
+        // Sensors-manager overlay: a tactical grid, a sensor sphere around each
+        // player ship, and a team-colored blip (sized by class) for every visible
+        // ship whose model is hidden. The mothership and capitals keep their model
+        // as anchors. The scene is dimmed (at submit, below) so these read clearly.
+        // Local UI only; fog of war matches the main loop's visibility rule.
         if sensors {
             push_sensor_grid(
                 &mut gizmo_lines,
@@ -753,14 +759,21 @@ impl App {
                 [0.13, 0.34, 0.52],
             );
             for e in &self.world.entities {
+                if e.ship.team == Team::Enemy && !detected.contains(&e.id) {
+                    continue;
+                }
                 let pos = e.prev_transform.pos.lerp(e.transform.pos, alpha);
                 if e.ship.team == Team::Player {
                     let sr = self.world.registry.get(e.ship.class).sensor_range;
                     push_sensor_sphere(&mut gizmo_lines, pos, sr, [0.2, 0.6, 0.95]);
-                } else if e.ship.team == Team::Enemy && detected.contains(&e.id) {
-                    let ground = Vec3::new(pos.x, 0.0, pos.z);
-                    push_circle(&mut gizmo_lines, ground, 2.0, [1.0, 0.3, 0.3], 18);
-                    push_line(&mut gizmo_lines, ground, pos, [0.8, 0.25, 0.25]);
+                }
+                if !sensors_shows_model(e.ship.class) {
+                    push_blip(
+                        &mut gizmo_lines,
+                        pos,
+                        blip_size(e.ship.class),
+                        blip_color(e.ship.team),
+                    );
                 }
             }
         }
@@ -1004,6 +1017,17 @@ fn push_sensor_sphere(v: &mut Vec<BgVertex>, center: Vec3, radius: f32, color: [
     let yo = radius * 0.5;
     push_ring(v, center + Vec3::Y * yo, rr, Vec3::X, Vec3::Z, color, SEG);
     push_ring(v, center - Vec3::Y * yo, rr, Vec3::X, Vec3::Z, color, SEG);
+}
+
+/// Tactical "blip" for a ship in the sensors view: a ring at the ship's altitude
+/// plus a pole down to the reference plane with a small foot ring, so position
+/// and altitude both read at a glance. `size` scales with the ship class.
+fn push_blip(v: &mut Vec<BgVertex>, pos: Vec3, size: f32, color: [f32; 3]) {
+    let dim = [color[0] * 0.5, color[1] * 0.5, color[2] * 0.5];
+    let ground = Vec3::new(pos.x, 0.0, pos.z);
+    push_circle(v, pos, size, color, 16);
+    push_line(v, pos, ground, dim);
+    push_circle(v, ground, size * 0.5, dim, 12);
 }
 
 /// Tactical reference grid on the y=0 plane, snapped to and centered on `center`
@@ -1884,6 +1908,34 @@ fn spawn_demo_fleet(world: &mut World) {
     ];
     for (class, pos) in enemy {
         world.spawn_class(class, Team::Enemy, pos);
+    }
+}
+
+/// Whether a class keeps its 3D model in the sensors-manager view (vs. collapsing
+/// into a blip). The mothership and capital ships stay as readable anchors.
+fn sensors_shows_model(class: ShipClass) -> bool {
+    matches!(class, ShipClass::Carrier | ShipClass::CapitalDestroyer)
+}
+
+/// Sensors-view blip radius (world units), scaled by class so larger ships read
+/// as bigger blips. Capital/carrier values are unused (they keep their model).
+fn blip_size(class: ShipClass) -> f32 {
+    match class {
+        ShipClass::Fighter => 1.2,
+        ShipClass::Bomber => 1.5,
+        ShipClass::Resourcer => 1.8,
+        ShipClass::Corvette => 2.1,
+        ShipClass::FrigateGeneral | ShipClass::FrigateMissile => 2.9,
+        ShipClass::CapitalDestroyer | ShipClass::Carrier => 3.6,
+    }
+}
+
+/// Sensors-view blip color, by team (blue friendly, red enemy, grey neutral).
+fn blip_color(team: Team) -> [f32; 3] {
+    match team {
+        Team::Player => [0.35, 0.65, 1.0],
+        Team::Enemy => [1.0, 0.32, 0.28],
+        Team::Neutral => [0.75, 0.78, 0.82],
     }
 }
 
