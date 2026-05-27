@@ -98,6 +98,59 @@ progress; consult `design.md` §12 & §18 for the intended layout.)
 
 ---
 
+## RTS prototype pitfalls (avoid these)
+
+Hard-won failure modes common to early RTS prototypes, concentrated around
+selection, movement, and the deterministic sim. Respect these when touching
+`sol-sim` steering or `sol-app` input.
+
+**Determinism (the expensive-to-fix ones)**
+
+- Selection, camera, picking, and input mode are **local UI** in `sol-app` only;
+  they must NEVER read or write `sol-sim` state, or networked peers desync.
+- Player input becomes a queued `Command` applied at a fixed-step boundary, never
+  a direct mutation mid-frame. Commands are the only thing lockstep syncs.
+- The sim steps on a fixed `dt`; never read frame time, wall-clock, or OS RNG in
+  `sol-sim`. Movement scaled by frame dt diverges and is framerate dependent.
+- No iteration whose order depends on a `HashMap`/pointer address if it affects
+  state. Iterate entities in stable id/index order.
+- Steering/separation must read a **snapshot of all positions taken before the
+  update**, so the result is order independent (ship 0's move must not change
+  ship 1's input within the same step).
+
+**Movement / steering**
+
+- NEVER send a whole group to one identical point: they stack, jitter, and fight
+  over the spot. A group move assigns each ship a distinct **formation slot**.
+- Add **separation** (soft repulsion between nearby ships) so they never overlap;
+  clamp the combined velocity to the ship's `maxSpeed` or it blows up.
+- Implement **arrival**: ease down within a stopping radius and zero the velocity
+  inside an arrive threshold, or ships orbit/oscillate around the goal forever.
+- Respect `accel` (no instant velocity changes / teleporting) and `turnRateDeg`
+  (rotate toward the velocity heading; never snap orientation).
+- Tune separation: too strong and ships vibrate/explode apart, too weak and they
+  interpenetrate. Clamp the push; let it fade once they are not overlapping.
+- Avoid hard collisions that deadlock (two ships swapping one slot forever); soft
+  separation plus per-ship slots sidesteps this for the prototype.
+- It is a 3D game (Homeworld). Movement may resolve on a chosen altitude plane in
+  the prototype, but do not bake in a 2D-only assumption.
+
+**Selection / input**
+
+- Distinguish a **click from a drag** (movement + time threshold) or every order
+  also orbits the camera / starts a band-box.
+- Picking and band-box must use a correct camera ray / unproject and must reject
+  points BEHIND the camera (a naive projection wraps them onto the screen).
+- Selection and control groups store stable `EntityId`s, never `Vec` indices
+  (indices shift when entities despawn).
+- Clicking empty space clears the selection.
+- **Mobile parity:** one finger already orbits and two fingers pinch-zoom, so a
+  selection is a TAP and a move is a tap on empty space (or a DOM button), all
+  driving the SAME commands as desktop. Never ship a unit-management feature that
+  only works with a mouse.
+
+---
+
 ## Build & dev commands
 
 > Scaffolding-dependent; update this section as crates land.

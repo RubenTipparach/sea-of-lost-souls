@@ -25,6 +25,11 @@ pub const TICK_HZ: u32 = 60;
 /// Seconds per fixed step (`1 / TICK_HZ`).
 pub const TICK_DT: f32 = 1.0 / TICK_HZ as f32;
 
+/// Separation: ships stay at least `(rA + rB) * SEPARATION_SPACING` apart; the
+/// overlap is turned into a corrective velocity scaled by `SEPARATION_GAIN`.
+const SEPARATION_SPACING: f32 = 1.15;
+const SEPARATION_GAIN: f32 = 3.0;
+
 /// World-space position and orientation of an entity.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Transform {
@@ -126,6 +131,8 @@ pub struct Blueprint {
     pub turn_rate_deg: f32,
     /// Operating crew the ship needs (allocated from the roster, not spent).
     pub crew: u32,
+    /// Gameplay radius (world units): separation spacing and pick sphere.
+    pub radius: f32,
 }
 
 /// Read-only table of per-class blueprints. Lookups are by key (deterministic);
@@ -139,19 +146,21 @@ impl ShipRegistry {
     /// Build the registry with Phase 1 placeholder stats (see the plan's ship
     /// suite table). Tuned later; the point now is that the sim reads them.
     pub fn with_defaults() -> Self {
-        // (class, mass t, max_speed, accel, turn deg/s, crew)
-        let rows: [(ShipClass, f32, f32, f32, f32, u32); 8] = [
-            (ShipClass::Fighter, 18.0, 140.0, 80.0, 120.0, 2),
-            (ShipClass::Bomber, 30.0, 110.0, 55.0, 80.0, 3),
-            (ShipClass::Corvette, 220.0, 85.0, 35.0, 55.0, 6),
-            (ShipClass::Resourcer, 140.0, 60.0, 25.0, 40.0, 3),
-            (ShipClass::FrigateGeneral, 4000.0, 45.0, 12.0, 22.0, 18),
-            (ShipClass::FrigateMissile, 4200.0, 42.0, 11.0, 20.0, 18),
-            (ShipClass::CapitalDestroyer, 16000.0, 28.0, 6.0, 10.0, 60),
-            (ShipClass::Carrier, 40000.0, 18.0, 3.0, 6.0, 120),
+        // (class, mass t, max_speed, accel, turn deg/s, crew, radius). Speeds are
+        // tuned for the current demo scene (tens of units across), not the plan's
+        // eventual large-world values; radius drives separation and picking.
+        let rows: [(ShipClass, f32, f32, f32, f32, u32, f32); 8] = [
+            (ShipClass::Fighter, 18.0, 16.0, 24.0, 130.0, 2, 1.0),
+            (ShipClass::Bomber, 30.0, 12.0, 16.0, 90.0, 3, 1.5),
+            (ShipClass::Corvette, 220.0, 10.0, 12.0, 70.0, 6, 2.25),
+            (ShipClass::Resourcer, 140.0, 8.0, 9.0, 55.0, 3, 2.5),
+            (ShipClass::FrigateGeneral, 4000.0, 6.0, 5.0, 30.0, 18, 4.25),
+            (ShipClass::FrigateMissile, 4200.0, 5.5, 4.5, 28.0, 18, 4.5),
+            (ShipClass::CapitalDestroyer, 16000.0, 4.0, 3.0, 14.0, 60, 6.0),
+            (ShipClass::Carrier, 40000.0, 3.0, 2.0, 8.0, 120, 8.0),
         ];
         let mut blueprints = HashMap::new();
-        for (class, mass, max_speed, accel, turn_rate_deg, crew) in rows {
+        for (class, mass, max_speed, accel, turn_rate_deg, crew, radius) in rows {
             blueprints.insert(
                 class,
                 Blueprint {
@@ -161,6 +170,7 @@ impl ShipRegistry {
                     accel,
                     turn_rate_deg,
                     crew,
+                    radius,
                 },
             );
         }
@@ -231,6 +241,8 @@ pub struct Entity {
     pub prev_transform: Transform,
     pub velocity: Velocity,
     pub ship: Ship,
+    /// Active move order target, if any (steered toward with arrive + turn).
+    pub order: Option<Vec3>,
     /// Optional circular patrol; when set, the step drives the transform.
     pub patrol: Option<Patrol>,
 }
@@ -241,9 +253,11 @@ pub struct Entity {
 /// velocity so the command path and determinism are exercised end to end.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Command {
-    /// Set an entity's linear velocity directly (placeholder for steering).
+    /// Steer an entity toward a world point (arrive behavior plus separation).
+    MoveTo { entity: EntityId, target: Vec3 },
+    /// Set an entity's linear velocity directly (used by tests).
     SetVelocity { entity: EntityId, linear: Vec3 },
-    /// Halt an entity.
+    /// Halt an entity and clear any move order.
     Stop { entity: EntityId },
 }
 
@@ -287,6 +301,7 @@ impl World {
             prev_transform: transform,
             velocity: Velocity::default(),
             ship,
+            order: None,
             patrol: None,
         });
         id
@@ -336,10 +351,16 @@ impl World {
     /// apply queued commands, snapshot transforms for interpolation, then
     /// integrate. Iteration is in stable order; no wall-clock or OS RNG.
     pub fn step(&mut self, dt: f32) {
-        // 1) Apply orders queued since the last step, in arrival order.
+        // 1) Apply queued orders at this step boundary, in arrival order.
         let pending = std::mem::take(&mut self.pending);
         for command in pending {
             match command {
+                Command::MoveTo { entity, target } => {
+                    if let Some(e) = self.entity_mut(entity) {
+                        e.order = Some(target);
+                        e.patrol = None; // a direct order overrides a patrol
+                    }
+                }
                 Command::SetVelocity { entity, linear } => {
                     if let Some(e) = self.entity_mut(entity) {
                         e.velocity.linear = linear;
@@ -347,27 +368,88 @@ impl World {
                 }
                 Command::Stop { entity } => {
                     if let Some(e) = self.entity_mut(entity) {
+                        e.order = None;
                         e.velocity.linear = Vec3::ZERO;
                     }
                 }
             }
         }
 
-        // 2) Snapshot for render interpolation, then advance: patrol entities
-        // follow their circle; the rest integrate their velocity (Euler).
+        // 2) Snapshot positions+radii BEFORE moving anyone, so separation is
+        // order independent (ship A's move can't change ship B's input this step).
+        let snapshot: Vec<(EntityId, Vec3, f32)> = self
+            .entities
+            .iter()
+            .map(|e| (e.id, e.transform.pos, self.registry.get(e.ship.class).radius))
+            .collect();
+
+        // 3) Advance each entity. Patrols follow their circle; otherwise run
+        // arrive + separation steering, clamped to the blueprint's limits.
         for e in &mut self.entities {
             e.prev_transform = e.transform;
-            match e.patrol.as_mut() {
-                Some(p) => {
-                    p.angle += p.angular_speed * dt;
-                    let pos = p.point();
-                    let heading = p.heading();
-                    e.transform.pos = pos;
-                    e.transform.rot = Quat::from_rotation_arc(Vec3::Z, heading);
+
+            if let Some(p) = e.patrol.as_mut() {
+                p.angle += p.angular_speed * dt;
+                let pos = p.point();
+                let heading = p.heading();
+                e.transform.pos = pos;
+                e.transform.rot = Quat::from_rotation_arc(Vec3::Z, heading);
+                continue;
+            }
+
+            let bp = self.registry.get(e.ship.class);
+            let my_pos = e.transform.pos;
+
+            // Desired velocity is zero unless we have a move order; an arrived or
+            // idle ship eases to a stop (it never separates, so it holds station).
+            let mut desired = Vec3::ZERO;
+            if let Some(target) = e.order {
+                let to = target - my_pos;
+                let dist = to.length();
+                let arrive = bp.radius * 0.5 + 0.3;
+                if dist <= arrive {
+                    e.order = None;
+                } else {
+                    // Arrive: ease down inside the stopping distance.
+                    let slowing = (bp.max_speed * bp.max_speed) / (2.0 * bp.accel.max(0.01));
+                    let speed = if dist < slowing {
+                        bp.max_speed * (dist / slowing)
+                    } else {
+                        bp.max_speed
+                    };
+                    desired = to / dist * speed;
+
+                    // Separation: only moving ships push out of overlap, so the
+                    // stationary fleet never drifts.
+                    let mut push = Vec3::ZERO;
+                    for &(id, pos, r) in &snapshot {
+                        if id == e.id {
+                            continue;
+                        }
+                        let off = my_pos - pos;
+                        let d = off.length();
+                        let min_d = (bp.radius + r) * SEPARATION_SPACING;
+                        if d > 1e-4 && d < min_d {
+                            push += off / d * (min_d - d);
+                        }
+                    }
+                    desired += push * SEPARATION_GAIN;
                 }
-                None => {
-                    e.transform.pos += e.velocity.linear * dt;
-                }
+            }
+
+            if desired.length() > bp.max_speed {
+                desired = desired.normalize() * bp.max_speed;
+            }
+            let dv = (desired - e.velocity.linear).clamp_length_max(bp.accel * dt);
+            e.velocity.linear += dv;
+            e.transform.pos += e.velocity.linear * dt;
+
+            // Turn toward the heading, clamped to the blueprint turn rate.
+            let v = e.velocity.linear;
+            if v.length_squared() > 1e-4 {
+                let target_rot = Quat::from_rotation_arc(Vec3::Z, v.normalize());
+                e.transform.rot =
+                    rotate_toward(e.transform.rot, target_rot, bp.turn_rate_deg.to_radians() * dt);
             }
         }
 
@@ -403,6 +485,17 @@ fn fnv1a(h: u64, x: u32) -> u64 {
     (h ^ x as u64).wrapping_mul(0x0000_0100_0000_01b3)
 }
 
+/// Rotate `from` toward `to` by at most `max_angle` radians (turn-rate clamp).
+fn rotate_toward(from: Quat, to: Quat, max_angle: f32) -> Quat {
+    let dot = from.dot(to).abs().clamp(-1.0, 1.0);
+    let angle = 2.0 * dot.acos();
+    if angle <= max_angle || angle < 1e-5 {
+        to
+    } else {
+        from.slerp(to, max_angle / angle)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -417,21 +510,18 @@ mod tests {
 
     #[test]
     fn integrates_position_from_velocity() {
+        // With no move order a ship eases to a stop, but a set velocity still
+        // integrates for the first step (before the decay dominates).
         let mut world = World::new(42);
         let id = world.spawn(fighter(), Transform::default());
         world.enqueue(Command::SetVelocity {
             entity: id,
             linear: Vec3::new(1.0, 0.0, -2.0),
         });
-        // 30 steps of TICK_DT == 1.0s of integration (the command applies on
-        // the first step, before integration).
-        for _ in 0..TICK_HZ {
-            world.step(TICK_DT);
-        }
+        world.step(TICK_DT);
         let p = world.entity(id).unwrap().transform.pos;
-        assert!((p.x - 1.0).abs() < 1e-4, "x = {}", p.x);
-        assert!((p.z + 2.0).abs() < 1e-4, "z = {}", p.z);
-        assert_eq!(world.tick, TICK_HZ as u64);
+        assert!(p.x > 0.0 && p.z < 0.0, "did not integrate: {p:?}");
+        assert_eq!(world.tick, 1);
     }
 
     #[test]
@@ -529,6 +619,51 @@ mod tests {
         let p = w.entity(id).unwrap().transform.pos;
         let r = (p.x * p.x + p.z * p.z).sqrt();
         assert!((r - 10.0).abs() < 1e-3, "patrol radius drifted: {r}");
+    }
+
+    #[test]
+    fn move_order_arrives_and_stops() {
+        let mut w = World::new(1);
+        let id = w.spawn_class(ShipClass::Corvette, Team::Player, Vec3::ZERO);
+        let target = Vec3::new(15.0, 0.0, 0.0);
+        w.enqueue(Command::MoveTo { entity: id, target });
+        for _ in 0..(TICK_HZ * 12) {
+            w.step(TICK_DT);
+        }
+        let e = w.entity(id).unwrap();
+        assert!(e.order.is_none(), "order was not cleared on arrival");
+        assert!(
+            (e.transform.pos - target).length() < 1.0,
+            "did not arrive: {:?}",
+            e.transform.pos
+        );
+        assert!(
+            e.velocity.linear.length() < 0.5,
+            "did not stop: {:?}",
+            e.velocity.linear
+        );
+    }
+
+    #[test]
+    fn separation_pushes_overlapping_ships_apart() {
+        let mut w = World::new(2);
+        let a = w.spawn_class(ShipClass::Corvette, Team::Player, Vec3::ZERO);
+        let b = w.spawn_class(ShipClass::Corvette, Team::Player, Vec3::new(0.05, 0.0, 0.0));
+        // Both ordered far away on the same heading: separation must spread them.
+        let target = Vec3::new(0.0, 0.0, 80.0);
+        w.enqueue(Command::MoveTo { entity: a, target });
+        w.enqueue(Command::MoveTo { entity: b, target });
+        for _ in 0..100 {
+            w.step(TICK_DT);
+        }
+        let pa = w.entity(a).unwrap().transform.pos;
+        let pb = w.entity(b).unwrap().transform.pos;
+        let r = w.registry.get(ShipClass::Corvette).radius;
+        assert!(
+            (pa - pb).length() > r,
+            "ships still overlapping ({} apart, radius {r})",
+            (pa - pb).length()
+        );
     }
 
     #[test]
