@@ -15,7 +15,7 @@ mod camera;
 mod mesh;
 
 pub use camera::OrbitCamera;
-pub use mesh::{CpuMesh, GpuMesh, Vertex};
+pub use mesh::{CpuMesh, CpuTexture, GpuMesh, Vertex};
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
@@ -98,6 +98,9 @@ pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
+    /// Base-color texture layout + a shared nearest sampler (pixel-art look).
+    texture_bgl: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
 
     /// Reusable per-frame instance buffer (grown as needed).
     instance_buffer: wgpu::Buffer,
@@ -208,6 +211,38 @@ impl Renderer {
             }],
         });
 
+        // Base-color texture: a sampled 2D texture + a shared nearest sampler.
+        let texture_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("texture bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("nearest sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
         // Mesh pipeline.
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mesh shader"),
@@ -215,7 +250,7 @@ impl Renderer {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("mesh pipeline layout"),
-            bind_group_layouts: &[Some(&camera_bgl)],
+            bind_group_layouts: &[Some(&camera_bgl), Some(&texture_bgl)],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -275,6 +310,8 @@ impl Renderer {
             pipeline,
             camera_buffer,
             camera_bind_group,
+            texture_bgl,
+            sampler,
             instance_buffer,
             instance_capacity,
         })
@@ -311,9 +348,78 @@ impl Renderer {
         self.depth_view = create_depth_view(&self.device, &self.config);
     }
 
-    /// Upload a CPU mesh to a drawable GPU mesh.
+    /// Upload a CPU mesh (and its baked texture) to a drawable GPU mesh.
     pub fn upload_mesh(&self, cpu: &CpuMesh, label: &str) -> GpuMesh {
-        cpu.upload(&self.device, label)
+        let vertex_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("{label}.vbuf")),
+                contents: bytemuck::cast_slice(&cpu.vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        let index_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(&format!("{label}.ibuf")),
+                contents: bytemuck::cast_slice(&cpu.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+        let view = self.upload_texture(cpu.texture.as_ref(), label);
+        let texture_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(&format!("{label}.tex_bg")),
+            layout: &self.texture_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+        GpuMesh {
+            vertex_buffer,
+            index_buffer,
+            index_count: cpu.indices.len() as u32,
+            texture_bind_group,
+        }
+    }
+
+    /// Upload a `CpuTexture` (or a 1x1 white fallback) and return its view.
+    fn upload_texture(&self, tex: Option<&CpuTexture>, label: &str) -> wgpu::TextureView {
+        let white = [255u8, 255, 255, 255];
+        let (w, h, data): (u32, u32, &[u8]) = match tex {
+            Some(t) if !t.rgba.is_empty() => (t.width.max(1), t.height.max(1), &t.rgba),
+            _ => (1, 1, &white),
+        };
+        let size = wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        };
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(&format!("{label}.tex")),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            texture.as_image_copy(),
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * w),
+                rows_per_image: Some(h),
+            },
+            size,
+        );
+        texture.create_view(&wgpu::TextureViewDescriptor::default())
     }
 
     /// Outcome of a [`Renderer::render`] call. `Lost`/`Outdated` mean the
@@ -326,11 +432,7 @@ impl Renderer {
     ) -> RenderOutcome {
         // Update camera uniform.
         let light_dir = Vec3::new(0.4, 0.8, 0.45).normalize();
-        let uniform = CameraUniform::new(
-            camera.view_proj(self.aspect()),
-            light_dir,
-            Vec3::new(0.62, 0.66, 0.72),
-        );
+        let uniform = CameraUniform::new(camera.view_proj(self.aspect()), light_dir, Vec3::ONE);
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
 
@@ -405,6 +507,7 @@ impl Renderer {
             if !raw.is_empty() {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                pass.set_bind_group(1, &mesh.texture_bind_group, &[]);
                 pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                 pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
                 pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);

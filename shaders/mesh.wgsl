@@ -1,35 +1,43 @@
-// Basic opaque mesh shader for Sea of Lost Souls.
+// Basic textured mesh shader for Sea of Lost Souls.
 //
-// Vertex format: position (vec3) + normal (vec3). Per-instance model matrix is
-// supplied as four vec4 vertex attributes (locations 2..=5). Camera view*proj
-// and world-space light direction come from a uniform buffer. Shading is a
-// simple Lambert term over a single directional light plus a small ambient
-// fill, which reads fine for grey-box ship hulls.
+// Vertex format: position (vec3) + normal (vec3) + uv (vec2, location 6). The
+// per-instance model matrix is four vec4 vertex attributes (locations 2..=5).
+// Camera view*proj, world-space light direction, and a base-color tint come
+// from a uniform buffer; the ship's baked texture is sampled with nearest
+// filtering for a crisp pixel look. Shading is a simple Lambert term plus a
+// small ambient fill, multiplied by the texture.
 
 struct Camera {
     view_proj: mat4x4<f32>,
     // xyz = direction TO the light (normalized), w unused.
     light_dir: vec4<f32>,
-    // rgb = base color, w unused.
+    // rgb = tint multiplied over the texture (white = untinted), w unused.
     base_color: vec4<f32>,
 };
 
 @group(0) @binding(0)
 var<uniform> camera: Camera;
 
+@group(1) @binding(0)
+var base_tex: texture_2d<f32>;
+@group(1) @binding(1)
+var base_sampler: sampler;
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
-    // Instance model matrix, one vec4 per row-as-column.
+    // Instance model matrix, one vec4 per column.
     @location(2) model_0: vec4<f32>,
     @location(3) model_1: vec4<f32>,
     @location(4) model_2: vec4<f32>,
     @location(5) model_3: vec4<f32>,
+    @location(6) uv: vec2<f32>,
 };
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_normal: vec3<f32>,
+    @location(1) uv: vec2<f32>,
 };
 
 @vertex
@@ -47,6 +55,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
         model[2].xyz,
     );
     out.world_normal = normalize(normal_mat * in.normal);
+    out.uv = in.uv;
     return out;
 }
 
@@ -55,7 +64,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let n = normalize(in.world_normal);
     let l = normalize(camera.light_dir.xyz);
     let lambert = max(dot(n, l), 0.0);
-    let ambient = 0.15;
-    let lit = camera.base_color.rgb * (ambient + lambert * 0.85);
+    let ambient = 0.18;
+    let tex = textureSample(base_tex, base_sampler, in.uv);
+    let lit = tex.rgb * camera.base_color.rgb * (ambient + lambert * 0.85);
     return vec4<f32>(lit, 1.0);
 }

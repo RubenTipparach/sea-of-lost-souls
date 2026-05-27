@@ -410,6 +410,16 @@ fn load_ship_mesh() -> CpuMesh {
         }
         log::warn!("no GLB found; using placeholder ship mesh");
     }
+    #[cfg(target_arch = "wasm32")]
+    {
+        // The compiled-asset path is git-ignored, so embed the committed
+        // authored GLB (it carries the baked pixel-art texture + UVs).
+        const GLB: &[u8] = include_bytes!("../../../assets/ships/test_interceptor/model.glb");
+        match CpuMesh::from_gltf_slice(GLB) {
+            Ok(m) => return m,
+            Err(e) => log::warn!("embedded GLB load failed: {e:#}; using placeholder"),
+        }
+    }
     placeholder_ship_mesh()
 }
 
