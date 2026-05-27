@@ -69,9 +69,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let lambert = max(dot(n, l), 0.0);
     let ambient = 0.18;
     let tex = textureSample(base_tex, base_sampler, in.uv);
-    let lit = tex.rgb * camera.base_color.rgb * in.tint.rgb * (ambient + lambert * 0.85);
-    // The texture alpha marks emissive texels (windows); add them unlit so they
-    // glow regardless of the light direction.
-    let emissive = tex.rgb * tex.a * 1.6;
+    // The texture alpha is a 3-band mask: ~0 = plain hull (grey, no livery),
+    // ~0.63 = livery (multiply by the per-instance team color), ~1.0 = emissive
+    // window. So a grey hull keeps a colored team livery and lit windows.
+    let livery = f32(tex.a > 0.2 && tex.a <= 0.85);
+    let window = f32(tex.a > 0.85);
+    let albedo = tex.rgb * mix(vec3<f32>(1.0), in.tint.rgb, livery);
+    let lit = albedo * camera.base_color.rgb * (ambient + lambert * 0.85);
+    let emissive = tex.rgb * window * 1.6;
     return vec4<f32>(lit + emissive, 1.0);
 }

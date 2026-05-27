@@ -47,7 +47,8 @@ impl CameraUniform {
 #[derive(Clone, Copy, Debug)]
 pub struct MeshInstance {
     pub model: Mat4,
-    /// Per-instance RGBA tint multiplied over the texture (team / selection).
+    /// Per-instance RGBA color. The mesh shader multiplies it onto the hull's
+    /// livery-band texels only (a faction color); other texels are unaffected.
     pub tint: [f32; 4],
 }
 

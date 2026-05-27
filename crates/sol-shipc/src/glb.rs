@@ -366,51 +366,67 @@ fn bytemuck_cast<T: bytemuck::Pod>(slice: &[T]) -> &[u8] {
     bytemuck::cast_slice(slice)
 }
 
-/// A small, deterministic pixel-art hull texture (RGBA8): steel plating with
-/// panel grid lines, a blue accent band, and scattered warm lights. Authored
-/// offline and baked into the GLB; never generated at runtime.
+/// A small, deterministic pixel-art hull texture (RGBA8): neutral steel plating
+/// with panel grid lines, a near-white **livery band**, a thin per-class accent
+/// stripe, and scattered warm lights. Authored offline and baked into the GLB;
+/// never generated at runtime.
+///
+/// The alpha channel is a 3-band mask read by `shaders/mesh.wgsl`:
+/// `0` = plain hull (grey, faction-independent), `160` = **livery** (multiplied
+/// at runtime by a per-instance faction color, so the same hull serves any
+/// faction), `255` = **emissive** window. Keeping livery a runtime color channel
+/// (not baked) is what lets us add factions without re-baking assets.
+const LIVERY_ALPHA: u8 = 160;
 fn hull_texture(accent: [u8; 3]) -> (u32, u32, Vec<u8>) {
     const S: u32 = 32;
     let mut px = vec![0u8; (S * S * 4) as usize];
     for y in 0..S {
         for x in 0..S {
             let i = ((y * S + x) * 4) as usize;
-            // Base steel with a subtle 1px dither.
+            // Neutral steel base with a subtle 1px dither.
             let dither = ((x ^ y) & 1) as i32 * 6;
-            let mut r = 90 + dither;
+            let mut r = 98 + dither;
             let mut g = 100 + dither;
-            let mut b = 116 + dither;
+            let mut b = 106 + dither;
+            let mut alpha = 0u8;
             // Panel grid lines every 8 px.
             if x % 8 == 0 || y % 8 == 0 {
                 r -= 34;
                 g -= 34;
                 b -= 34;
             }
-            // A per-class accent band.
+            // Livery band: near-white so the runtime faction tint reads true.
             if (10..=13).contains(&y) {
+                r = 208;
+                g = 212;
+                b = 220;
+                alpha = LIVERY_ALPHA;
+            }
+            // A thin baked per-class accent stripe (class identity, not livery).
+            if (18..=19).contains(&y) {
                 r = accent[0] as i32;
                 g = accent[1] as i32;
                 b = accent[2] as i32;
+                alpha = 0;
             }
-            // Emissive windows: the alpha channel marks emissive texels so they
-            // glow even on the unlit side, reading the silhouette in the dark.
-            let mut emissive = false;
+            // Emissive windows: alpha 255 marks texels that glow even unlit, so
+            // the silhouette reads on the dark side.
             if x % 8 == 4 && y % 8 == 4 {
                 r = 235;
                 g = 220;
                 b = 150;
-                emissive = true;
+                alpha = 255;
             }
             if y % 16 == 9 && x % 4 == 2 {
                 r = 150;
                 g = 215;
                 b = 245;
-                emissive = true;
+                alpha = 255;
             }
             px[i] = r.clamp(0, 255) as u8;
             px[i + 1] = g.clamp(0, 255) as u8;
             px[i + 2] = b.clamp(0, 255) as u8;
-            px[i + 3] = if emissive { 255 } else { 0 };
+            px[i + 3] = alpha;
         }
     }
     (S, S, px)

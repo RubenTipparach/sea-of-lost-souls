@@ -433,15 +433,13 @@ impl App {
             let scale = Vec3::splat(class_scale(e.ship.class));
             let model = Mat4::from_scale_rotation_translation(scale, rot, pos);
             let selected = self.selected.contains(&e.id);
-            let tint = if selected {
-                [0.45, 1.0, 0.65, 1.0]
-            } else {
-                [1.0, 1.0, 1.0, 1.0]
-            };
+            // The hull's livery band is tinted by this faction color; selection
+            // is shown by the ground gizmo + bars, not a hull tint.
+            let livery = livery_color(e.ship.class, e.ship.team);
             groups
                 .entry(e.ship.class)
                 .or_default()
-                .push(MeshInstance::with_tint(model, tint));
+                .push(MeshInstance::with_tint(model, livery));
 
             let r = self.world.registry.get(e.ship.class).radius;
 
@@ -1440,6 +1438,21 @@ fn spawn_demo_fleet(world: &mut World) {
                 angle,
             },
         );
+    }
+}
+
+/// Per-instance faction livery color. The mesh shader multiplies it onto the
+/// hull's livery band (the rest of the hull stays neutral grey), so one baked
+/// hull serves every faction: to add a faction, add a `Team` arm here. Resourcers
+/// are always yellow regardless of side, for at-a-glance identification.
+fn livery_color(class: ShipClass, team: Team) -> [f32; 4] {
+    if class == ShipClass::Resourcer {
+        return [1.0, 0.82, 0.12, 1.0]; // harvester yellow
+    }
+    match team {
+        Team::Player => [0.30, 0.55, 1.0, 1.0],   // blue
+        Team::Enemy => [1.0, 0.28, 0.24, 1.0],    // red
+        Team::Neutral => [0.72, 0.74, 0.78, 1.0], // neutral grey
     }
 }
 
