@@ -9,7 +9,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use glam::{Mat4, Vec3, Vec4};
-use sol_render::{CpuMesh, GpuMesh, MeshInstance, OrbitCamera, RenderOutcome, Renderer, Vertex};
+use sol_render::{
+    BgVertex, CpuMesh, GpuMesh, MeshInstance, OrbitCamera, RenderOutcome, Renderer, Vertex,
+};
 use sol_sim::{Command, EntityId, Patrol, ShipClass, Team, World};
 use web_time::Instant;
 use winit::application::ApplicationHandler;
@@ -205,7 +207,7 @@ impl App {
         let size = window.inner_size();
         let (w, h) = (size.width.max(1), size.height.max(1));
 
-        let renderer = match Renderer::new_blocking(Arc::clone(&window), w, h) {
+        let mut renderer = match Renderer::new_blocking(Arc::clone(&window), w, h) {
             Ok(r) => r,
             Err(e) => {
                 log::error!("failed to create renderer: {e:#}");
@@ -213,6 +215,8 @@ impl App {
             }
         };
         let meshes = upload_class_meshes(&renderer);
+        let (nebula, nebula_idx, stars, grid) = build_environment();
+        renderer.set_environment(&nebula, &nebula_idx, &stars, &grid);
 
         self.camera.focus = Vec3::ZERO;
         self.camera.distance = 30.0;
@@ -237,8 +241,10 @@ impl App {
         });
         wasm_bindgen_futures::spawn_local(async move {
             match Renderer::new(Arc::clone(&window), w, h).await {
-                Ok(renderer) => {
+                Ok(mut renderer) => {
                     let meshes = upload_class_meshes(&renderer);
+                    let (nebula, nebula_idx, stars, grid) = build_environment();
+                    renderer.set_environment(&nebula, &nebula_idx, &stars, &grid);
                     *slot.borrow_mut() = Some(Graphics { renderer, meshes });
                     window.request_redraw();
                 }
@@ -693,6 +699,45 @@ fn upload_class_meshes(renderer: &Renderer) -> HashMap<ShipClass, GpuMesh> {
         meshes.insert(class, renderer.upload_mesh(&cpu, class.id()));
     }
     meshes
+}
+
+/// Build the background environment: a seeded nebula sphere + star field from
+/// `sol-procgen`, plus a y=0 reference grid that sells movement and scale.
+fn build_environment() -> (Vec<BgVertex>, Vec<u32>, Vec<BgVertex>, Vec<BgVertex>) {
+    let bg = sol_procgen::generate_background(0x5EA0_5005, 800.0);
+    let nebula: Vec<BgVertex> = bg
+        .nebula_positions
+        .iter()
+        .zip(&bg.nebula_colors)
+        .map(|(p, c)| BgVertex::new(*p, *c))
+        .collect();
+    let stars: Vec<BgVertex> = bg
+        .star_positions
+        .iter()
+        .zip(&bg.star_colors)
+        .map(|(p, c)| BgVertex::new(*p, *c))
+        .collect();
+    (nebula, bg.nebula_indices, stars, build_grid())
+}
+
+/// A grid of dim dots on the y=0 plane, fading with distance, as a spatial
+/// reference for movement and speed.
+fn build_grid() -> Vec<BgVertex> {
+    const N: i32 = 25;
+    const SPACING: f32 = 6.0;
+    let half = (N - 1) as f32 * 0.5 * SPACING;
+    let mut pts = Vec::with_capacity((N * N) as usize);
+    for i in 0..N {
+        for j in 0..N {
+            let x = i as f32 * SPACING - half;
+            let z = j as f32 * SPACING - half;
+            let d = (x * x + z * z).sqrt();
+            let fade = (1.0 - d / (half * 1.15)).clamp(0.0, 1.0);
+            let c = 0.05 + 0.12 * fade;
+            pts.push(BgVertex::new([x, 0.0, z], [c * 0.55, c * 0.7, c]));
+        }
+    }
+    pts
 }
 
 /// Load a class's authored hull GLB (on-disk on native, embedded on web),

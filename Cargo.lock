@@ -1962,6 +1962,7 @@ dependencies = [
  "log",
  "pollster",
  "sol-assets",
+ "sol-procgen",
  "sol-render",
  "sol-sim",
  "wasm-bindgen",
@@ -1987,6 +1988,9 @@ version = "0.1.0"
 [[package]]
 name = "sol-procgen"
 version = "0.1.0"
+dependencies = [
+ "glam",
+]
 
 [[package]]
 name = "sol-render"

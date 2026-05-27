@@ -17,6 +17,7 @@ path = "src/lib.rs"
 sol-render = { path = "../sol-render" }
 sol-sim = { path = "../sol-sim" }
 sol-assets = { path = "../sol-assets" }
+sol-procgen = { path = "../sol-procgen" }
 glam.workspace = true
 winit.workspace = true
 web-time.workspace = true

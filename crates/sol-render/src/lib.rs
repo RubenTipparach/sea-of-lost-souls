@@ -89,6 +89,42 @@ impl InstanceRaw {
     }
 }
 
+/// A vertex-colored background vertex: position + linear RGB. Shared by the
+/// nebula sphere, the star field, and the ground reference grid.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct BgVertex {
+    pub pos: [f32; 3],
+    pub color: [f32; 3],
+}
+
+impl BgVertex {
+    pub fn new(pos: [f32; 3], color: [f32; 3]) -> Self {
+        Self { pos, color }
+    }
+
+    fn layout() -> wgpu::VertexBufferLayout<'static> {
+        const ATTRS: [wgpu::VertexAttribute; 2] =
+            wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<BgVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &ATTRS,
+        }
+    }
+}
+
+/// Uploaded background geometry: nebula sphere, star points, grid points.
+struct Environment {
+    nebula_vbuf: wgpu::Buffer,
+    nebula_ibuf: wgpu::Buffer,
+    nebula_index_count: u32,
+    star_vbuf: wgpu::Buffer,
+    star_count: u32,
+    grid_vbuf: wgpu::Buffer,
+    grid_count: u32,
+}
+
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// Dark space clear color.
 const CLEAR_COLOR: wgpu::Color = wgpu::Color {
@@ -112,6 +148,13 @@ pub struct Renderer {
     /// Base-color texture layout + a shared nearest sampler (pixel-art look).
     texture_bgl: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+
+    /// Vertex-colored background pipelines (nebula triangles, far star points,
+    /// near grid points) and the uploaded environment geometry.
+    bg_tri_pipeline: wgpu::RenderPipeline,
+    points_far_pipeline: wgpu::RenderPipeline,
+    points_near_pipeline: wgpu::RenderPipeline,
+    environment: Option<Environment>,
 
     /// Reusable per-frame instance buffer (grown as needed).
     instance_buffer: wgpu::Buffer,
@@ -304,6 +347,46 @@ impl Renderer {
             cache: None,
         });
 
+        // Background pipelines (vertex-colored; reuse the camera bind group).
+        let bg_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("background shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../../../shaders/background.wgsl").into(),
+            ),
+        });
+        let bg_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("background pipeline layout"),
+            bind_group_layouts: &[Some(&camera_bgl)],
+            immediate_size: 0,
+        });
+        let bg_tri_pipeline = bg_pipeline(
+            &device,
+            &bg_layout,
+            &bg_shader,
+            config.format,
+            wgpu::PrimitiveTopology::TriangleList,
+            false,
+            wgpu::CompareFunction::Always,
+        );
+        let points_far_pipeline = bg_pipeline(
+            &device,
+            &bg_layout,
+            &bg_shader,
+            config.format,
+            wgpu::PrimitiveTopology::PointList,
+            false,
+            wgpu::CompareFunction::Always,
+        );
+        let points_near_pipeline = bg_pipeline(
+            &device,
+            &bg_layout,
+            &bg_shader,
+            config.format,
+            wgpu::PrimitiveTopology::PointList,
+            true,
+            wgpu::CompareFunction::Less,
+        );
+
         let instance_capacity = 256;
         let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("instance buffer"),
@@ -323,6 +406,10 @@ impl Renderer {
             camera_bind_group,
             texture_bgl,
             sampler,
+            bg_tri_pipeline,
+            points_far_pipeline,
+            points_near_pipeline,
+            environment: None,
             instance_buffer,
             instance_capacity,
         })
@@ -433,6 +520,54 @@ impl Renderer {
         texture.create_view(&wgpu::TextureViewDescriptor::default())
     }
 
+    /// Upload the background environment: nebula sphere, star points, and the
+    /// ground reference grid. Call once after creating the renderer.
+    pub fn set_environment(
+        &mut self,
+        nebula: &[BgVertex],
+        nebula_indices: &[u32],
+        stars: &[BgVertex],
+        grid: &[BgVertex],
+    ) {
+        let nebula_vbuf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("nebula.vbuf"),
+                contents: bytemuck::cast_slice(nebula),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        let nebula_ibuf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("nebula.ibuf"),
+                contents: bytemuck::cast_slice(nebula_indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+        let star_vbuf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("stars.vbuf"),
+                contents: bytemuck::cast_slice(stars),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        let grid_vbuf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("grid.vbuf"),
+                contents: bytemuck::cast_slice(grid),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        self.environment = Some(Environment {
+            nebula_vbuf,
+            nebula_ibuf,
+            nebula_index_count: nebula_indices.len() as u32,
+            star_vbuf,
+            star_count: stars.len() as u32,
+            grid_vbuf,
+            grid_count: grid.len() as u32,
+        });
+    }
+
     /// Draw several mesh groups in one pass: each group is a mesh plus the
     /// instances drawn with it, so the whole fleet renders with a single clear.
     /// Groups share one instance buffer via contiguous per-group ranges.
@@ -521,6 +656,22 @@ impl Renderer {
                 multiview_mask: None,
             });
 
+            // Background first: nebula + stars (no depth write) then the ground
+            // grid (depth-tested), so ships render over them correctly.
+            if let Some(env) = &self.environment {
+                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                pass.set_pipeline(&self.bg_tri_pipeline);
+                pass.set_vertex_buffer(0, env.nebula_vbuf.slice(..));
+                pass.set_index_buffer(env.nebula_ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..env.nebula_index_count, 0, 0..1);
+                pass.set_pipeline(&self.points_far_pipeline);
+                pass.set_vertex_buffer(0, env.star_vbuf.slice(..));
+                pass.draw(0..env.star_count, 0..1);
+                pass.set_pipeline(&self.points_near_pipeline);
+                pass.set_vertex_buffer(0, env.grid_vbuf.slice(..));
+                pass.draw(0..env.grid_count, 0..1);
+            }
+
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
@@ -562,6 +713,59 @@ pub enum RenderOutcome {
     Skipped,
     /// Surface is lost/outdated; caller should reconfigure (resize) and retry.
     NeedsReconfigure,
+}
+
+/// Build a vertex-colored background pipeline (no instancing, no texture; reuses
+/// the camera bind group). Topology + depth behavior vary per use (nebula
+/// triangles and far stars skip depth; the near grid is depth-tested).
+fn bg_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+    topology: wgpu::PrimitiveTopology,
+    depth_write: bool,
+    depth_compare: wgpu::CompareFunction,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("background pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            buffers: &[BgVertex::layout()],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(depth_write),
+            depth_compare: Some(depth_compare),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 fn create_depth_view(
