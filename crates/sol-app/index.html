@@ -72,6 +72,24 @@
         font: 600 17px/1.2 system-ui, sans-serif;
         padding: 16px 28px;
       }
+      /* Selection/order controls, the shared command seam for desktop + mobile. */
+      #sol-controls {
+        position: fixed;
+        left: 10px;
+        bottom: 10px;
+        z-index: 20;
+        display: flex;
+        gap: 8px;
+      }
+      #sol-controls button {
+        appearance: none;
+        border: 1px solid #2b6cb0;
+        border-radius: 8px;
+        background: rgba(11, 26, 43, 0.8);
+        color: #cfe0f5;
+        font: 600 14px/1 system-ui, sans-serif;
+        padding: 10px 12px;
+      }
     </style>
     <script>
       // Treat phones and tablets as mobile (including iPadOS, which sends a
@@ -153,5 +171,10 @@
         refresh();
       })();
     </script>
+    <div id="sol-controls">
+      <button id="sol-select-all" type="button">Select All</button>
+      <button id="sol-stop" type="button">Stop</button>
+      <button id="sol-clear" type="button">Clear</button>
+    </div>
   </body>
 </html>

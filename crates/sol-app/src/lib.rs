@@ -7,9 +7,9 @@
 
 use std::sync::Arc;
 
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec3, Vec4};
 use sol_render::{CpuMesh, GpuMesh, MeshInstance, OrbitCamera, RenderOutcome, Renderer, Vertex};
-use sol_sim::{Patrol, ShipClass, Team, World};
+use sol_sim::{Command, EntityId, Patrol, ShipClass, Team, World};
 use web_time::Instant;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
@@ -152,6 +152,18 @@ struct App {
     last_frame: Option<Instant>,
     /// Real time accumulated but not yet consumed by a fixed step.
     accumulator: f32,
+    /// Locally-selected ships (UI state only; never enters the sim).
+    selected: Vec<EntityId>,
+    /// Latest cursor position in physical pixels.
+    cursor: (f64, f64),
+    /// Left/right mouse press positions, for click-vs-drag discrimination.
+    lmb_down: Option<(f64, f64)>,
+    rmb_down: Option<(f64, f64)>,
+    /// Touch tap tracking (a tap is a short, still, single-finger touch).
+    touch_count: u32,
+    tap_id: Option<u64>,
+    tap_start: (f64, f64),
+    tap_moved: bool,
     /// On web, adapter/device acquisition is async; the result lands here.
     #[cfg(target_arch = "wasm32")]
     pending: Option<PendingGraphics>,
@@ -169,6 +181,14 @@ impl App {
             world,
             last_frame: None,
             accumulator: 0.0,
+            selected: Vec::new(),
+            cursor: (0.0, 0.0),
+            lmb_down: None,
+            rmb_down: None,
+            touch_count: 0,
+            tap_id: None,
+            tap_start: (0.0, 0.0),
+            tap_moved: false,
             #[cfg(target_arch = "wasm32")]
             pending: None,
         }
@@ -254,6 +274,10 @@ impl App {
             return;
         }
 
+        // Apply queued UI commands (DOM buttons on web) at the frame boundary.
+        #[cfg(target_arch = "wasm32")]
+        self.drain_ui_queue();
+
         // Advance the fixed-step sim by however much real time has elapsed,
         // clamped so a backgrounded tab does not trigger a step spiral. The
         // accumulator and clock live here, never in the deterministic sim.
@@ -286,7 +310,13 @@ impl App {
                 let pos = e.prev_transform.pos.lerp(e.transform.pos, alpha);
                 let rot = e.prev_transform.rot.slerp(e.transform.rot, alpha);
                 let scale = Vec3::splat(class_scale(e.ship.class));
-                MeshInstance::new(Mat4::from_scale_rotation_translation(scale, rot, pos))
+                let model = Mat4::from_scale_rotation_translation(scale, rot, pos);
+                let tint = if self.selected.contains(&e.id) {
+                    [0.45, 1.0, 0.65, 1.0]
+                } else {
+                    [1.0, 1.0, 1.0, 1.0]
+                };
+                MeshInstance::with_tint(model, tint)
             })
             .collect();
 
@@ -303,6 +333,206 @@ impl App {
         // Keep animating (the sim advances continuously).
         if let Some(window) = &self.window {
             window.request_redraw();
+        }
+    }
+}
+
+/// Pixels of cursor/touch travel still treated as a click (vs a drag).
+const CLICK_SLOP: f64 = 6.0;
+/// Pixels of touch travel still treated as a tap.
+const TAP_SLOP: f64 = 14.0;
+
+fn dist2(a: (f64, f64), b: (f64, f64)) -> f64 {
+    let (dx, dy) = (a.0 - b.0, a.1 - b.1);
+    dx * dx + dy * dy
+}
+
+/// Grid of formation slots on the move plane, centered on `center`, so a group
+/// move never sends every ship to one point (they would stack and fight).
+fn formation_slots(center: Vec3, n: usize, spacing: f32) -> Vec<Vec3> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let cols = (n as f32).sqrt().ceil() as usize;
+    let rows = n.div_ceil(cols);
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let (c, r) = (i % cols, i / cols);
+        let ox = (c as f32 - (cols as f32 - 1.0) * 0.5) * spacing;
+        let oz = (r as f32 - (rows as f32 - 1.0) * 0.5) * spacing;
+        out.push(center + Vec3::new(ox, 0.0, oz));
+    }
+    out
+}
+
+impl App {
+    /// Build a world-space ray from a screen pixel (selection + move picking).
+    fn screen_ray(&self, sx: f64, sy: f64) -> Option<(Vec3, Vec3)> {
+        let size = self.window.as_ref()?.inner_size();
+        let (w, h) = (size.width.max(1) as f32, size.height.max(1) as f32);
+        let ndc_x = 2.0 * sx as f32 / w - 1.0;
+        let ndc_y = 1.0 - 2.0 * sy as f32 / h;
+        let inv = self.camera.view_proj(w / h).inverse();
+        let near = inv * Vec4::new(ndc_x, ndc_y, 0.0, 1.0);
+        let far = inv * Vec4::new(ndc_x, ndc_y, 1.0, 1.0);
+        if near.w.abs() < 1e-6 || far.w.abs() < 1e-6 {
+            return None;
+        }
+        let near = near.truncate() / near.w;
+        let far = far.truncate() / far.w;
+        Some((near, (far - near).normalize_or_zero()))
+    }
+
+    /// Nearest ship whose bounding sphere the screen ray hits.
+    fn pick(&self, sx: f64, sy: f64) -> Option<EntityId> {
+        let (origin, dir) = self.screen_ray(sx, sy)?;
+        let mut best: Option<(f32, EntityId)> = None;
+        for e in &self.world.entities {
+            let center = e.transform.pos;
+            let r = self.world.registry.get(e.ship.class).radius;
+            let t = (center - origin).dot(dir);
+            if t <= 0.0 {
+                continue;
+            }
+            let closest = origin + dir * t;
+            if (closest - center).length() <= r && best.is_none_or(|(bt, _)| t < bt) {
+                best = Some((t, e.id));
+            }
+        }
+        best.map(|(_, id)| id)
+    }
+
+    /// Intersect the screen ray with the horizontal plane at `plane_y`.
+    fn ground_point(&self, sx: f64, sy: f64, plane_y: f32) -> Option<Vec3> {
+        let (origin, dir) = self.screen_ray(sx, sy)?;
+        if dir.y.abs() < 1e-5 {
+            return None;
+        }
+        let t = (plane_y - origin.y) / dir.y;
+        (t > 0.0).then_some(origin + dir * t)
+    }
+
+    fn selection_centroid_y(&self) -> f32 {
+        let mut sum = 0.0;
+        let mut n = 0.0;
+        for id in &self.selected {
+            if let Some(e) = self.world.entity(*id) {
+                sum += e.transform.pos.y;
+                n += 1.0;
+            }
+        }
+        if n > 0.0 {
+            sum / n
+        } else {
+            0.0
+        }
+    }
+
+    /// Left click / tap on a ship selects it; on empty space, clears.
+    fn on_select_click(&mut self, sx: f64, sy: f64) {
+        match self.pick(sx, sy) {
+            Some(id) => self.selected = vec![id],
+            None => self.selected.clear(),
+        }
+    }
+
+    /// Right click / mobile move: order the selection into a formation here.
+    fn on_move_click(&mut self, sx: f64, sy: f64) {
+        if self.selected.is_empty() {
+            return;
+        }
+        let plane_y = self.selection_centroid_y();
+        if let Some(center) = self.ground_point(sx, sy, plane_y) {
+            self.issue_move(center);
+        }
+    }
+
+    /// Mobile tap: select a tapped ship, else move the current selection here.
+    fn on_tap(&mut self, sx: f64, sy: f64) {
+        if let Some(id) = self.pick(sx, sy) {
+            self.selected = vec![id];
+        } else if !self.selected.is_empty() {
+            self.on_move_click(sx, sy);
+        }
+    }
+
+    fn issue_move(&mut self, center: Vec3) {
+        let ids = self.selected.clone();
+        if ids.is_empty() {
+            return;
+        }
+        let max_r = ids
+            .iter()
+            .filter_map(|id| self.world.entity(*id))
+            .map(|e| self.world.registry.get(e.ship.class).radius)
+            .fold(1.0_f32, f32::max);
+        let spacing = max_r * 2.5 + 1.0;
+        let slots = formation_slots(center, ids.len(), spacing);
+        for (id, slot) in ids.iter().zip(slots) {
+            self.world.enqueue(Command::MoveTo {
+                entity: *id,
+                target: slot,
+            });
+        }
+    }
+
+    fn select_all_player(&mut self) {
+        self.selected = self
+            .world
+            .entities
+            .iter()
+            .filter(|e| e.ship.team == Team::Player)
+            .map(|e| e.id)
+            .collect();
+    }
+
+    fn stop_selected(&mut self) {
+        for id in self.selected.clone() {
+            self.world.enqueue(Command::Stop { entity: id });
+        }
+    }
+
+    /// Tap detection for touch: returns the position on a clean, still,
+    /// single-finger tap, so one-finger drags still orbit and pinches zoom.
+    fn on_touch_tap(&mut self, phase: TouchPhase, id: u64, x: f64, y: f64) -> Option<(f64, f64)> {
+        match phase {
+            TouchPhase::Started => {
+                self.touch_count += 1;
+                if self.touch_count == 1 {
+                    self.tap_id = Some(id);
+                    self.tap_start = (x, y);
+                    self.tap_moved = false;
+                } else {
+                    self.tap_moved = true; // a second finger is a pinch, not a tap
+                }
+                None
+            }
+            TouchPhase::Moved => {
+                if self.tap_id == Some(id) && dist2(self.tap_start, (x, y)) > TAP_SLOP * TAP_SLOP {
+                    self.tap_moved = true;
+                }
+                None
+            }
+            TouchPhase::Ended | TouchPhase::Cancelled => {
+                self.touch_count = self.touch_count.saturating_sub(1);
+                let tap = self.tap_id == Some(id) && !self.tap_moved && phase == TouchPhase::Ended;
+                if self.tap_id == Some(id) {
+                    self.tap_id = None;
+                }
+                tap.then_some((x, y))
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn drain_ui_queue(&mut self) {
+        let cmds = UI_QUEUE.with(|q| std::mem::take(&mut *q.borrow_mut()));
+        for cmd in cmds {
+            match cmd {
+                UiCmd::SelectAll => self.select_all_player(),
+                UiCmd::Stop => self.stop_selected(),
+                UiCmd::Clear => self.selected.clear(),
+            }
         }
     }
 }
@@ -334,9 +564,33 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseInput { button, state, .. } => {
-                self.controller.on_mouse_button(button, state);
+                let pos = self.cursor;
+                match (button, state) {
+                    (MouseButton::Left, ElementState::Pressed) => self.lmb_down = Some(pos),
+                    (MouseButton::Left, ElementState::Released) => {
+                        if let Some(p0) = self.lmb_down.take() {
+                            if dist2(p0, pos) < CLICK_SLOP * CLICK_SLOP {
+                                self.on_select_click(pos.0, pos.1);
+                            }
+                        }
+                    }
+                    (MouseButton::Right, ElementState::Pressed) => {
+                        self.rmb_down = Some(pos);
+                        self.controller.on_mouse_button(button, state);
+                    }
+                    (MouseButton::Right, ElementState::Released) => {
+                        self.controller.on_mouse_button(button, state);
+                        if let Some(p0) = self.rmb_down.take() {
+                            if dist2(p0, pos) < CLICK_SLOP * CLICK_SLOP {
+                                self.on_move_click(pos.0, pos.1);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
+                self.cursor = (position.x, position.y);
                 self.controller
                     .on_cursor_moved(&mut self.camera, position.x, position.y);
             }
@@ -344,8 +598,23 @@ impl ApplicationHandler for App {
                 self.controller.on_scroll(&mut self.camera, delta);
             }
             WindowEvent::Touch(t) => {
+                if let Some((tx, ty)) = self.on_touch_tap(t.phase, t.id, t.location.x, t.location.y)
+                {
+                    self.on_tap(tx, ty);
+                }
                 self.controller
                     .on_touch(&mut self.camera, t.phase, t.id, t.location.x, t.location.y);
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                use winit::keyboard::{Key, NamedKey};
+                if event.state == ElementState::Pressed {
+                    match event.logical_key.as_ref() {
+                        Key::Character("a") | Key::Character("A") => self.select_all_player(),
+                        Key::Character("s") | Key::Character("S") => self.stop_selected(),
+                        Key::Named(NamedKey::Escape) => self.selected.clear(),
+                        _ => {}
+                    }
+                }
             }
             WindowEvent::RedrawRequested => self.redraw(),
             _ => {}
@@ -514,16 +783,55 @@ fn show_overlay_error(msg: &str) {
     }
 }
 
-/// wasm entry point. Trunk calls this on load. Sets up panic/log hooks, appends
-/// a canvas to the document body, and starts the app.
+/// DOM control-panel commands, pushed from button click listeners and drained
+/// by the app each frame. This is the wasm command seam: the mobile DOM panel
+/// and (later) desktop input feed the SAME selection/order path.
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Copy)]
+enum UiCmd {
+    SelectAll,
+    Stop,
+    Clear,
+}
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static UI_QUEUE: std::cell::RefCell<Vec<UiCmd>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(target_arch = "wasm32")]
+fn push_ui(cmd: UiCmd) {
+    UI_QUEUE.with(|q| q.borrow_mut().push(cmd));
+}
+
+/// Attach the DOM control buttons (by id) to the UI command queue. Called
+/// before the event loop starts (which never returns on web).
+#[cfg(target_arch = "wasm32")]
+fn wire_dom_controls() {
+    let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+        return;
+    };
+    for (id, cmd) in [
+        ("sol-select-all", UiCmd::SelectAll),
+        ("sol-stop", UiCmd::Stop),
+        ("sol-clear", UiCmd::Clear),
+    ] {
+        if let Some(el) = doc.get_element_by_id(id) {
+            let cb = Closure::<dyn FnMut()>::new(move || push_ui(cmd));
+            let _ = el.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref());
+            cb.forget();
+        }
+    }
+}
+
+/// wasm entry point. Trunk calls this on load. Sets up panic/log hooks, wires
+/// the DOM controls, then starts the app (which creates the canvas).
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen(start)]
 pub fn start() {
     console_error_panic_hook::set_once();
     let _ = console_log::init_with_level(log::Level::Info);
 
-    // winit creates the canvas on web via the Window; append it to <body>.
-    // The actual canvas wiring happens inside winit 0.30's web backend; here we
-    // just ensure a document exists, then run.
+    wire_dom_controls();
     run();
 }

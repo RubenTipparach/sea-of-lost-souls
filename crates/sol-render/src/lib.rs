@@ -46,11 +46,20 @@ impl CameraUniform {
 #[derive(Clone, Copy, Debug)]
 pub struct MeshInstance {
     pub model: Mat4,
+    /// Per-instance RGBA tint multiplied over the texture (team / selection).
+    pub tint: [f32; 4],
 }
 
 impl MeshInstance {
     pub fn new(model: Mat4) -> Self {
-        Self { model }
+        Self {
+            model,
+            tint: [1.0, 1.0, 1.0, 1.0],
+        }
+    }
+
+    pub fn with_tint(model: Mat4, tint: [f32; 4]) -> Self {
+        Self { model, tint }
     }
 }
 
@@ -60,15 +69,17 @@ impl MeshInstance {
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct InstanceRaw {
     model: [[f32; 4]; 4],
+    tint: [f32; 4],
 }
 
 impl InstanceRaw {
     fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRS: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
+        const ATTRS: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
             2 => Float32x4,
             3 => Float32x4,
             4 => Float32x4,
             5 => Float32x4,
+            7 => Float32x4,
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<InstanceRaw>() as wgpu::BufferAddress,
@@ -441,6 +452,7 @@ impl Renderer {
             .iter()
             .map(|i| InstanceRaw {
                 model: i.model.to_cols_array_2d(),
+                tint: i.tint,
             })
             .collect();
         if raw.len() as u64 > self.instance_capacity {

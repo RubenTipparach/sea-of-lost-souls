@@ -32,12 +32,14 @@ struct VertexInput {
     @location(4) model_2: vec4<f32>,
     @location(5) model_3: vec4<f32>,
     @location(6) uv: vec2<f32>,
+    @location(7) tint: vec4<f32>,
 };
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_normal: vec3<f32>,
     @location(1) uv: vec2<f32>,
+    @location(2) tint: vec4<f32>,
 };
 
 @vertex
@@ -56,6 +58,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     );
     out.world_normal = normalize(normal_mat * in.normal);
     out.uv = in.uv;
+    out.tint = in.tint;
     return out;
 }
 
@@ -66,6 +69,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let lambert = max(dot(n, l), 0.0);
     let ambient = 0.18;
     let tex = textureSample(base_tex, base_sampler, in.uv);
-    let lit = tex.rgb * camera.base_color.rgb * (ambient + lambert * 0.85);
+    let lit = tex.rgb * camera.base_color.rgb * in.tint.rgb * (ambient + lambert * 0.85);
     return vec4<f32>(lit, 1.0);
 }
