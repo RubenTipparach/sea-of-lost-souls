@@ -2012,6 +2012,7 @@ dependencies = [
  "glam",
  "gltf",
  "gltf-json",
+ "png",
  "serde",
  "serde_json",
  "sol-assets",

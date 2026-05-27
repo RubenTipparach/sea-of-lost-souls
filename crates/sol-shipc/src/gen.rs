@@ -78,5 +78,11 @@ pub fn verify_node_names(path: &Path) -> anyhow::Result<()> {
         bail!("node \"hull\" exists but carries no mesh");
     }
 
+    // Sanity: the baked pixel-art texture must be present (and decodable, since
+    // `gltf::import` above would have failed otherwise).
+    if doc.images().count() == 0 {
+        bail!("generated GLB has no baked texture image");
+    }
+
     Ok(())
 }

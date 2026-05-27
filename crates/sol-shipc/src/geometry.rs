@@ -12,18 +12,22 @@ use glam::Vec3;
 pub struct Mesh {
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
+    pub uvs: Vec<[f32; 2]>,
     pub indices: Vec<u32>,
 }
 
 impl Mesh {
     /// Append a single flat-shaded quad (counter-clockwise winding when viewed
-    /// from the side the normal points toward). Splits into two triangles.
+    /// from the side the normal points toward). Splits into two triangles. Each
+    /// face spans the full [0,1] UV range so the baked pixel-art tiles per panel.
     fn push_quad(&mut self, a: Vec3, b: Vec3, c: Vec3, d: Vec3) {
         let normal = (b - a).cross(c - a).normalize_or_zero();
         let base = self.positions.len() as u32;
-        for v in [a, b, c, d] {
+        let uvs = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        for (v, uv) in [a, b, c, d].into_iter().zip(uvs) {
             self.positions.push(v.to_array());
             self.normals.push(normal.to_array());
+            self.uvs.push(uv);
         }
         // a,b,c and a,c,d
         self.indices
@@ -90,9 +94,11 @@ impl Mesh {
         for (p0, p1) in [(br, bl), (tr, br), (tl, tr), (bl, tl)] {
             let normal = (p1 - p0).cross(apex - p0).normalize_or_zero();
             let base = self.positions.len() as u32;
-            for v in [p0, p1, apex] {
+            let uvs = [[0.0, 0.0], [1.0, 0.0], [0.5, 1.0]];
+            for (v, uv) in [p0, p1, apex].into_iter().zip(uvs) {
                 self.positions.push(v.to_array());
                 self.normals.push(normal.to_array());
+                self.uvs.push(uv);
             }
             self.indices.extend_from_slice(&[base, base + 1, base + 2]);
         }
@@ -131,6 +137,7 @@ mod tests {
         let m = build_interceptor_hull();
         assert!(!m.positions.is_empty());
         assert_eq!(m.positions.len(), m.normals.len());
+        assert_eq!(m.positions.len(), m.uvs.len());
         assert_eq!(m.indices.len() % 3, 0);
         // Every index must be in range.
         let n = m.positions.len() as u32;
