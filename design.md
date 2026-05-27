@@ -1098,8 +1098,9 @@ no install.
 builds and deploys to GitHub Pages**, with **no main-branch gate**. We deploy
 via the official **GitHub Actions Pages** flow (Pages source = "GitHub
 Actions"), which serves a **single live site**: the most recent push wins. This
-mirrors the pattern used by the sibling `rts-engine-c` project. Pull requests
-build for verification but do not deploy.
+mirrors the pattern used by the sibling `rts-engine-c` project. Each push is one
+run: a build job, then a deploy job, so nothing competes with the deploying
+push run.
 
 ### What gets built
 
@@ -1144,15 +1145,15 @@ name: build-and-deploy
 on:
   push:
     branches: ["**"]        # every branch, every commit, no gates
-  pull_request:
-    branches: [main]        # PRs build (verify) but do not deploy
   workflow_dispatch:
 permissions:
   contents: read
   pages: write
   id-token: write
 concurrency:
-  group: pages              # single shared deploy; newest push wins
+  # Keyed by ref: only a newer push to the SAME ref cancels an older in-flight
+  # run. Guards overlapping pushes; one run is always build then deploy.
+  group: pages-${{ github.ref }}
   cancel-in-progress: true
 jobs:
   build:
@@ -1172,11 +1173,9 @@ jobs:
           mkdir -p site_build/editor
           cp -r crates/sol-app/dist/. site_build/
           cp -r editor/dist/. site_build/editor/
-      - if: github.event_name == 'push'
-        uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v3
         with: { path: site_build }
   deploy:
-    if: github.event_name == 'push'
     needs: build
     runs-on: ubuntu-latest
     environment:

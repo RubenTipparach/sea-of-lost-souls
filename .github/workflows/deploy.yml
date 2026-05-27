@@ -1,14 +1,12 @@
 name: build-and-deploy
 
 # Build the wasm game + the web ship editor and deploy to GitHub Pages on every
-# commit to any branch (no main-branch gate), using the official GitHub Actions
-# Pages flow. A single Pages deployment is shared across branches: last push
-# wins. PRs build for verification but do not deploy. See design.md §17.
+# push to any branch (no main-branch gate), using the official GitHub Actions
+# Pages flow. One run per push: one build job, then one deploy job. A single
+# shared Pages deployment; the latest push wins. See design.md §17.
 on:
   push:
     branches: ["**"]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -16,11 +14,11 @@ permissions:
   pages: write
   id-token: write
 
-# Cancel an in-flight run only when a newer run for the SAME ref arrives (so a
-# newer push to a branch supersedes its own older deploy). The group is keyed by
-# ref on purpose: a shared "pages" group made the PR-verification run cancel the
-# deploying push run (push and PR have different refs), which silently skipped
-# every deploy. The github-pages environment serializes the actual deployments.
+# Concurrency is not about the steps inside one run (that is always build then
+# deploy); it guards OVERLAPPING runs. If you push twice in quick succession the
+# newer push cancels the older in-flight run for the same ref, so the live site
+# tracks the latest commit and two deploys never race the single github-pages
+# environment.
 concurrency:
   group: pages-${{ github.ref }}
   cancel-in-progress: true
@@ -73,17 +71,13 @@ jobs:
           cp -r crates/sol-app/dist/. site_build/
           cp -r editor/dist/. site_build/editor/
 
-      # Pages artifact is only produced on push. PR builds (which may come from
-      # forks with read-only tokens) just verify the build above.
       - name: Upload Pages artifact
-        if: github.event_name == 'push'
         uses: actions/upload-pages-artifact@v3
         with:
           path: site_build
 
   deploy:
     name: deploy to GitHub Pages
-    if: github.event_name == 'push'
     needs: build
     runs-on: ubuntu-latest
     environment:
