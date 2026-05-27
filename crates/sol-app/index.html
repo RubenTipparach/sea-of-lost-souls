@@ -49,15 +49,21 @@
         display: none;
       }
     </style>
-    <!-- eruda: on-device DevTools console for mobile testing. Loads only on
-         touch devices, or on any device when the URL carries ?eruda. -->
+    <script>
+      // Treat phones and tablets as mobile (including iPadOS, which sends a
+      // desktop UA but is touch-first). Touch-capable laptops are NOT mobile, so
+      // mobile-only UI (eruda, the landscape prompt) stays off on desktop.
+      window.__solIsMobile = function () {
+        var ua = navigator.userAgent || "";
+        if (/Mobi|Android|iPhone|iPad|iPod/i.test(ua)) return true;
+        return /Macintosh/.test(ua) && (navigator.maxTouchPoints || 0) > 1;
+      };
+    </script>
+    <!-- eruda: on-device DevTools console. Mobile only (or ?eruda anywhere). -->
     <script>
       (function () {
         var force = new URLSearchParams(location.search).has("eruda");
-        var touch =
-          (navigator.maxTouchPoints || 0) > 0 ||
-          /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-        if (!force && !touch) return;
+        if (!force && !window.__solIsMobile()) return;
         var s = document.createElement("script");
         s.src = "https://cdn.jsdelivr.net/npm/eruda@3";
         s.onload = function () {
@@ -79,10 +85,7 @@
       (function () {
         var btn = document.getElementById("go-landscape");
         if (!btn) return;
-        var touch =
-          (navigator.maxTouchPoints || 0) > 0 ||
-          /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-        if (!touch) return;
+        if (!window.__solIsMobile()) return;
 
         function portrait() {
           return (
