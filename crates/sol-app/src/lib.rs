@@ -10,7 +10,8 @@ use std::sync::Arc;
 
 use glam::{Mat4, Vec3, Vec4};
 use sol_render::{
-    BgVertex, CpuMesh, GpuMesh, MeshInstance, OrbitCamera, RenderOutcome, Renderer, Vertex,
+    BgVertex, CpuMesh, GpuMesh, MeshInstance, OrbitCamera, RenderOutcome, Renderer, StarInstance,
+    Vertex,
 };
 use sol_sim::{Command, EntityId, Patrol, ShipClass, Team, World};
 use web_time::Instant;
@@ -703,20 +704,29 @@ fn upload_class_meshes(renderer: &Renderer) -> HashMap<ShipClass, GpuMesh> {
 
 /// Build the background environment: a seeded nebula sphere + star field from
 /// `sol-procgen`, plus a y=0 reference grid that sells movement and scale.
-fn build_environment() -> (Vec<BgVertex>, Vec<u32>, Vec<BgVertex>, Vec<BgVertex>) {
-    let bg = sol_procgen::generate_background(0x5EA0_5005, 800.0);
+fn build_environment() -> (Vec<BgVertex>, Vec<u32>, Vec<StarInstance>, Vec<BgVertex>) {
+    const RADIUS: f32 = 800.0;
+    let bg = sol_procgen::generate_background(0x5EA0_5005, RADIUS);
     let nebula: Vec<BgVertex> = bg
         .nebula_positions
         .iter()
         .zip(&bg.nebula_colors)
         .map(|(p, c)| BgVertex::new(*p, *c))
         .collect();
-    let stars: Vec<BgVertex> = bg
+    let mut stars: Vec<StarInstance> = bg
         .star_positions
         .iter()
         .zip(&bg.star_colors)
-        .map(|(p, c)| BgVertex::new(*p, *c))
+        .zip(&bg.star_sizes)
+        .map(|((p, c), s)| StarInstance::new(*p, *c, *s))
         .collect();
+    // A bright sun in the key-light direction anchors the scene lighting.
+    let sun_dir = Vec3::from(sol_render::LIGHT_DIR).normalize();
+    stars.push(StarInstance::new(
+        (sun_dir * (RADIUS * 0.95)).to_array(),
+        [1.0, 0.95, 0.8],
+        0.07,
+    ));
     (nebula, bg.nebula_indices, stars, build_grid())
 }
 

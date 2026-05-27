@@ -25,6 +25,8 @@ pub struct Background {
     pub nebula_indices: Vec<u32>,
     pub star_positions: Vec<[f32; 3]>,
     pub star_colors: Vec<[f32; 3]>,
+    /// Per-star sprite size (clip-space fraction of half-height).
+    pub star_sizes: Vec<f32>,
 }
 
 /// A small, fast, seeded RNG (splitmix64). Deterministic for reproducible
@@ -125,13 +127,14 @@ pub fn generate_background(seed: u64, radius: f32) -> Background {
     }
 
     // Star field: bright points just inside the nebula sphere.
-    let star_count = 700;
+    let star_count = 900;
     let mut star_positions = Vec::with_capacity(star_count);
     let mut star_colors = Vec::with_capacity(star_count);
+    let mut star_sizes = Vec::with_capacity(star_count);
     for _ in 0..star_count {
         let dir = rng.unit_vec();
         star_positions.push((dir * (radius * 0.97)).to_array());
-        let b = rng.range(0.35, 1.0);
+        let b = rng.range(0.4, 1.0);
         // Mostly white, a few warm/cool tints.
         let tint = match (rng.next_u64() % 5) as u8 {
             0 => Vec3::new(1.0, 0.85, 0.7),
@@ -139,6 +142,16 @@ pub fn generate_background(seed: u64, radius: f32) -> Background {
             _ => Vec3::new(1.0, 1.0, 1.0),
         };
         star_colors.push((tint * b).to_array());
+        // SNES-style size variety: mostly tiny, some medium, a few bright.
+        let roll = rng.unit();
+        let size = if roll > 0.97 {
+            rng.range(0.016, 0.026)
+        } else if roll > 0.85 {
+            rng.range(0.008, 0.013)
+        } else {
+            rng.range(0.0028, 0.006)
+        };
+        star_sizes.push(size);
     }
 
     Background {
@@ -147,6 +160,7 @@ pub fn generate_background(seed: u64, radius: f32) -> Background {
         nebula_indices,
         star_positions,
         star_colors,
+        star_sizes,
     }
 }
 

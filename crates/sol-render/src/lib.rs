@@ -32,11 +32,12 @@ struct CameraUniform {
 }
 
 impl CameraUniform {
-    fn new(view_proj: Mat4, light_dir: Vec3, base_color: Vec3) -> Self {
+    fn new(view_proj: Mat4, light_dir: Vec3, base_color: Vec3, aspect: f32) -> Self {
         Self {
             view_proj: view_proj.to_cols_array_2d(),
             light_dir: [light_dir.x, light_dir.y, light_dir.z, 0.0],
-            base_color: [base_color.x, base_color.y, base_color.z, 1.0],
+            // w carries the screen aspect (used to keep star sprites square).
+            base_color: [base_color.x, base_color.y, base_color.z, aspect],
         }
     }
 }
@@ -114,12 +115,41 @@ impl BgVertex {
     }
 }
 
-/// Uploaded background geometry: nebula sphere, star points, grid points.
+/// One star sprite instance: world center, color, and clip-space size.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct StarInstance {
+    pub center: [f32; 3],
+    pub color: [f32; 3],
+    pub size: f32,
+}
+
+impl StarInstance {
+    pub fn new(center: [f32; 3], color: [f32; 3], size: f32) -> Self {
+        Self {
+            center,
+            color,
+            size,
+        }
+    }
+
+    fn layout() -> wgpu::VertexBufferLayout<'static> {
+        const ATTRS: [wgpu::VertexAttribute; 3] =
+            wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32];
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<StarInstance>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &ATTRS,
+        }
+    }
+}
+
+/// Uploaded background geometry: nebula sphere, star sprites, grid points.
 struct Environment {
     nebula_vbuf: wgpu::Buffer,
     nebula_ibuf: wgpu::Buffer,
     nebula_index_count: u32,
-    star_vbuf: wgpu::Buffer,
+    star_inst_buf: wgpu::Buffer,
     star_count: u32,
     grid_vbuf: wgpu::Buffer,
     grid_count: u32,
@@ -133,6 +163,9 @@ const CLEAR_COLOR: wgpu::Color = wgpu::Color {
     b: 0.02,
     a: 1.0,
 };
+
+/// World-space direction TO the key light, also where the sun sprite is placed.
+pub const LIGHT_DIR: [f32; 3] = [0.4, 0.8, 0.45];
 
 /// The renderer. Owns the wgpu device/queue/surface and the mesh pipeline.
 pub struct Renderer {
@@ -152,7 +185,7 @@ pub struct Renderer {
     /// Vertex-colored background pipelines (nebula triangles, far star points,
     /// near grid points) and the uploaded environment geometry.
     bg_tri_pipeline: wgpu::RenderPipeline,
-    points_far_pipeline: wgpu::RenderPipeline,
+    star_pipeline: wgpu::RenderPipeline,
     points_near_pipeline: wgpu::RenderPipeline,
     environment: Option<Environment>,
 
@@ -237,7 +270,7 @@ impl Renderer {
         let depth_view = create_depth_view(&device, &config);
 
         // Camera uniform + bind group.
-        let camera_uniform = CameraUniform::new(Mat4::IDENTITY, Vec3::Y, Vec3::ONE);
+        let camera_uniform = CameraUniform::new(Mat4::IDENTITY, Vec3::Y, Vec3::ONE, 1.0);
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("camera uniform"),
             contents: bytemuck::bytes_of(&camera_uniform),
@@ -367,15 +400,7 @@ impl Renderer {
             wgpu::PrimitiveTopology::TriangleList,
             false,
             wgpu::CompareFunction::Always,
-        );
-        let points_far_pipeline = bg_pipeline(
-            &device,
-            &bg_layout,
-            &bg_shader,
-            config.format,
-            wgpu::PrimitiveTopology::PointList,
-            false,
-            wgpu::CompareFunction::Always,
+            "fs_nebula",
         );
         let points_near_pipeline = bg_pipeline(
             &device,
@@ -385,7 +410,60 @@ impl Renderer {
             wgpu::PrimitiveTopology::PointList,
             true,
             wgpu::CompareFunction::Less,
+            "fs_main",
         );
+        // Star sprites: instanced additive quads (corners from the vertex index).
+        let star_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("stars shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../../shaders/stars.wgsl").into()),
+        });
+        let additive = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        };
+        let star_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("star pipeline"),
+            layout: Some(&bg_layout),
+            vertex: wgpu::VertexState {
+                module: &star_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[StarInstance::layout()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &star_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState {
+                        color: additive,
+                        alpha: additive,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
 
         let instance_capacity = 256;
         let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -407,7 +485,7 @@ impl Renderer {
             texture_bgl,
             sampler,
             bg_tri_pipeline,
-            points_far_pipeline,
+            star_pipeline,
             points_near_pipeline,
             environment: None,
             instance_buffer,
@@ -526,7 +604,7 @@ impl Renderer {
         &mut self,
         nebula: &[BgVertex],
         nebula_indices: &[u32],
-        stars: &[BgVertex],
+        stars: &[StarInstance],
         grid: &[BgVertex],
     ) {
         let nebula_vbuf = self
@@ -543,10 +621,10 @@ impl Renderer {
                 contents: bytemuck::cast_slice(nebula_indices),
                 usage: wgpu::BufferUsages::INDEX,
             });
-        let star_vbuf = self
+        let star_inst_buf = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("stars.vbuf"),
+                label: Some("stars.instances"),
                 contents: bytemuck::cast_slice(stars),
                 usage: wgpu::BufferUsages::VERTEX,
             });
@@ -561,7 +639,7 @@ impl Renderer {
             nebula_vbuf,
             nebula_ibuf,
             nebula_index_count: nebula_indices.len() as u32,
-            star_vbuf,
+            star_inst_buf,
             star_count: stars.len() as u32,
             grid_vbuf,
             grid_count: grid.len() as u32,
@@ -578,8 +656,9 @@ impl Renderer {
         groups: &[(&GpuMesh, &[MeshInstance])],
     ) -> RenderOutcome {
         // Update camera uniform.
-        let light_dir = Vec3::new(0.4, 0.8, 0.45).normalize();
-        let uniform = CameraUniform::new(camera.view_proj(self.aspect()), light_dir, Vec3::ONE);
+        let light_dir = Vec3::from(LIGHT_DIR).normalize();
+        let uniform =
+            CameraUniform::new(camera.view_proj(self.aspect()), light_dir, Vec3::ONE, self.aspect());
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
 
@@ -664,9 +743,9 @@ impl Renderer {
                 pass.set_vertex_buffer(0, env.nebula_vbuf.slice(..));
                 pass.set_index_buffer(env.nebula_ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..env.nebula_index_count, 0, 0..1);
-                pass.set_pipeline(&self.points_far_pipeline);
-                pass.set_vertex_buffer(0, env.star_vbuf.slice(..));
-                pass.draw(0..env.star_count, 0..1);
+                pass.set_pipeline(&self.star_pipeline);
+                pass.set_vertex_buffer(0, env.star_inst_buf.slice(..));
+                pass.draw(0..6, 0..env.star_count);
                 pass.set_pipeline(&self.points_near_pipeline);
                 pass.set_vertex_buffer(0, env.grid_vbuf.slice(..));
                 pass.draw(0..env.grid_count, 0..1);
@@ -718,6 +797,7 @@ pub enum RenderOutcome {
 /// Build a vertex-colored background pipeline (no instancing, no texture; reuses
 /// the camera bind group). Topology + depth behavior vary per use (nebula
 /// triangles and far stars skip depth; the near grid is depth-tested).
+#[allow(clippy::too_many_arguments)]
 fn bg_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
@@ -726,6 +806,7 @@ fn bg_pipeline(
     topology: wgpu::PrimitiveTopology,
     depth_write: bool,
     depth_compare: wgpu::CompareFunction,
+    frag_entry: &str,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("background pipeline"),
@@ -738,7 +819,7 @@ fn bg_pipeline(
         },
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some("fs_main"),
+            entry_point: Some(frag_entry),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
                 blend: Some(wgpu::BlendState::REPLACE),
