@@ -622,12 +622,25 @@ Supporting order tools (Homeworld defaults shown):
 - **Single select:** left-click a ship.
 - **Band-box (marquee):** left-click-drag a screen rectangle; selects friendlies
   whose footprint intersects it (frustum test against hull colliders for 3D
-  correctness).
+  correctness). *Prototype:* the test is against each ship's projected center
+  (the full footprint/frustum test lands with colliders).
+- **Mobile band-box:** hold the on-screen **Box Select** button and drag a
+  second finger to sweep the rectangle (one finger alone still orbits); it
+  drives the same selection path as the desktop drag.
 - **Select all of type:** double-click a ship → all of that type on screen.
 - **Control / hotkey groups:** `Ctrl+1…9` to bind, `1…9` to recall (double-tap
   to focus the group).
 - **Modifiers:** `Shift` add, `Alt`/`Ctrl` subtract (configurable).
 - **From the sensors view:** selection and orders work at fleet scale too.
+
+**Selection & order gizmos (prototype, drawn world-to-screen per [§10](#10-ui--hud)):**
+each selected ship gets a wireframe **ground circle** on the `y=0` plane plus a
+vertical **elevation pole** to the hull (reading X/Z and altitude above/below the
+plane), a **dashed destination line** while it has a move order, and a floating
+**health bar**. A group move defaults to the class-segregated **military parade**
+(carrier front-center, capitals trailing, frigates flanking, fighters/bombers on
+the wings, resourcers rear) when the mothership is in the selection, and falls
+back to a grid otherwise; `C` (or the HUD button) cycles Parade / Grid / Line.
 
 ### 9.4 Attack & combat orders
 
@@ -659,6 +672,7 @@ Supporting order tools (Homeworld defaults shown):
 | Select all of type | Double-click | On-screen |
 | Move (disc) | `M`, then mouse; `Shift`+vertical = altitude | The 3D move tool |
 | Context order | RMB | Move on empty / attack on enemy |
+| Cycle formation | `C` | Prototype cycles Parade / Grid / Line (Delta/Broad/Wall/X … later); also a HUD button for touch |
 | Attack-move | `Ctrl+A` | |
 | Waypoints / Stop / Guard / Dock / Jump | `W` / `S` / `G` / `D` / `J` | |
 | Control group set/recall | `Ctrl+N` / `N` | |

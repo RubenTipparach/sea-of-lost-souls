@@ -102,11 +102,7 @@ pub fn generate_background(seed: u64, radius: f32) -> Background {
         for j in 0..=sectors {
             let u = j as f32 / sectors as f32;
             let theta = u * std::f32::consts::TAU; // 0..2pi
-            let dir = Vec3::new(
-                phi.sin() * theta.cos(),
-                phi.cos(),
-                phi.sin() * theta.sin(),
-            );
+            let dir = Vec3::new(phi.sin() * theta.cos(), phi.cos(), phi.sin() * theta.sin());
             let color = nebula_color(dir, base, &lobes);
             nebula_positions.push((dir * radius).to_array());
             nebula_colors.push(color.to_array());

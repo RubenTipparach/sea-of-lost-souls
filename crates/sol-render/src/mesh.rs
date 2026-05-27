@@ -139,7 +139,10 @@ pub struct GpuMesh {
 
 /// Extract a primitive's base-color texture as RGBA8, if it has one.
 fn primitive_texture(prim: &gltf::Primitive, images: &[gltf::image::Data]) -> Option<CpuTexture> {
-    let info = prim.material().pbr_metallic_roughness().base_color_texture()?;
+    let info = prim
+        .material()
+        .pbr_metallic_roughness()
+        .base_color_texture()?;
     let image = images.get(info.texture().source().index())?;
     Some(to_rgba8(image))
 }

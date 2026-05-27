@@ -229,7 +229,10 @@ pub fn build_glb(mesh: &Mesh, accent: [u8; 3]) -> anyhow::Result<Vec<u8>> {
     let mut attributes = std::collections::BTreeMap::new();
     attributes.insert(Valid(json::mesh::Semantic::Positions), json::Index::new(0));
     attributes.insert(Valid(json::mesh::Semantic::Normals), json::Index::new(1));
-    attributes.insert(Valid(json::mesh::Semantic::TexCoords(0)), json::Index::new(2));
+    attributes.insert(
+        Valid(json::mesh::Semantic::TexCoords(0)),
+        json::Index::new(2),
+    );
 
     let primitive = json::mesh::Primitive {
         attributes,

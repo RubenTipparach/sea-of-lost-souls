@@ -133,6 +133,9 @@ pub struct Blueprint {
     pub crew: u32,
     /// Gameplay radius (world units): separation spacing and pick sphere.
     pub radius: f32,
+    /// Hull points at full health. Combat (later phase) drains the entity's
+    /// `hull`; the HUD reads `hull / max_hull` for the health bar.
+    pub max_hull: f32,
 }
 
 /// Read-only table of per-class blueprints. Lookups are by key (deterministic);
@@ -146,21 +149,59 @@ impl ShipRegistry {
     /// Build the registry with Phase 1 placeholder stats (see the plan's ship
     /// suite table). Tuned later; the point now is that the sim reads them.
     pub fn with_defaults() -> Self {
-        // (class, mass t, max_speed, accel, turn deg/s, crew, radius). Speeds are
-        // tuned for the current demo scene (tens of units across), not the plan's
-        // eventual large-world values; radius drives separation and picking.
-        let rows: [(ShipClass, f32, f32, f32, f32, u32, f32); 8] = [
-            (ShipClass::Fighter, 18.0, 16.0, 24.0, 130.0, 2, 1.0),
-            (ShipClass::Bomber, 30.0, 12.0, 16.0, 90.0, 3, 1.5),
-            (ShipClass::Corvette, 220.0, 10.0, 12.0, 70.0, 6, 2.25),
-            (ShipClass::Resourcer, 140.0, 8.0, 9.0, 55.0, 3, 2.5),
-            (ShipClass::FrigateGeneral, 4000.0, 6.0, 5.0, 30.0, 18, 4.25),
-            (ShipClass::FrigateMissile, 4200.0, 5.5, 4.5, 28.0, 18, 4.5),
-            (ShipClass::CapitalDestroyer, 16000.0, 4.0, 3.0, 14.0, 60, 6.0),
-            (ShipClass::Carrier, 40000.0, 3.0, 2.0, 8.0, 120, 8.0),
+        // (class, mass t, max_speed, accel, turn deg/s, crew, radius, max_hull).
+        // Speeds are tuned for the current demo scene (tens of units across), not
+        // the plan's eventual large-world values; radius drives separation and
+        // picking; max_hull is placeholder until combat tuning lands.
+        type Row = (ShipClass, f32, f32, f32, f32, u32, f32, f32);
+        let rows: [Row; 8] = [
+            (ShipClass::Fighter, 18.0, 16.0, 24.0, 130.0, 2, 1.0, 80.0),
+            (ShipClass::Bomber, 30.0, 12.0, 16.0, 90.0, 3, 1.5, 120.0),
+            (ShipClass::Corvette, 220.0, 10.0, 12.0, 70.0, 6, 2.25, 400.0),
+            (ShipClass::Resourcer, 140.0, 8.0, 9.0, 55.0, 3, 2.5, 300.0),
+            (
+                ShipClass::FrigateGeneral,
+                4000.0,
+                6.0,
+                5.0,
+                30.0,
+                18,
+                4.25,
+                2000.0,
+            ),
+            (
+                ShipClass::FrigateMissile,
+                4200.0,
+                5.5,
+                4.5,
+                28.0,
+                18,
+                4.5,
+                1900.0,
+            ),
+            (
+                ShipClass::CapitalDestroyer,
+                16000.0,
+                4.0,
+                3.0,
+                14.0,
+                60,
+                6.0,
+                8000.0,
+            ),
+            (
+                ShipClass::Carrier,
+                40000.0,
+                3.0,
+                2.0,
+                8.0,
+                120,
+                8.0,
+                20000.0,
+            ),
         ];
         let mut blueprints = HashMap::new();
-        for (class, mass, max_speed, accel, turn_rate_deg, crew, radius) in rows {
+        for (class, mass, max_speed, accel, turn_rate_deg, crew, radius, max_hull) in rows {
             blueprints.insert(
                 class,
                 Blueprint {
@@ -171,6 +212,7 @@ impl ShipRegistry {
                     turn_rate_deg,
                     crew,
                     radius,
+                    max_hull,
                 },
             );
         }
@@ -241,6 +283,9 @@ pub struct Entity {
     pub prev_transform: Transform,
     pub velocity: Velocity,
     pub ship: Ship,
+    /// Current hull points; starts at the blueprint `max_hull`. Combat drains it
+    /// later; the HUD reads `hull / max_hull` for the health bar.
+    pub hull: f32,
     /// Active move order target, if any (steered toward with arrive + turn).
     pub order: Option<Vec3>,
     /// Optional circular patrol; when set, the step drives the transform.
@@ -295,12 +340,14 @@ impl World {
     pub fn spawn(&mut self, ship: Ship, transform: Transform) -> EntityId {
         let id = EntityId(self.next_id);
         self.next_id += 1;
+        let max_hull = self.registry.get(ship.class).max_hull;
         self.entities.push(Entity {
             id,
             transform,
             prev_transform: transform,
             velocity: Velocity::default(),
             ship,
+            hull: max_hull,
             order: None,
             patrol: None,
         });
@@ -380,7 +427,13 @@ impl World {
         let snapshot: Vec<(EntityId, Vec3, f32)> = self
             .entities
             .iter()
-            .map(|e| (e.id, e.transform.pos, self.registry.get(e.ship.class).radius))
+            .map(|e| {
+                (
+                    e.id,
+                    e.transform.pos,
+                    self.registry.get(e.ship.class).radius,
+                )
+            })
             .collect();
 
         // 3) Advance each entity. Patrols follow their circle; otherwise run
@@ -448,8 +501,11 @@ impl World {
             let v = e.velocity.linear;
             if v.length_squared() > 1e-4 {
                 let target_rot = Quat::from_rotation_arc(Vec3::Z, v.normalize());
-                e.transform.rot =
-                    rotate_toward(e.transform.rot, target_rot, bp.turn_rate_deg.to_radians() * dt);
+                e.transform.rot = rotate_toward(
+                    e.transform.rot,
+                    target_rot,
+                    bp.turn_rate_deg.to_radians() * dt,
+                );
             }
         }
 
@@ -472,9 +528,14 @@ impl World {
             for v in [r.x, r.y, r.z, r.w] {
                 h = fnv1a(h, v.to_bits());
             }
-            for v in [e.velocity.linear.x, e.velocity.linear.y, e.velocity.linear.z] {
+            for v in [
+                e.velocity.linear.x,
+                e.velocity.linear.y,
+                e.velocity.linear.z,
+            ] {
                 h = fnv1a(h, v.to_bits());
             }
+            h = fnv1a(h, e.hull.to_bits());
         }
         h
     }
@@ -664,6 +725,14 @@ mod tests {
             "ships still overlapping ({} apart, radius {r})",
             (pa - pb).length()
         );
+    }
+
+    #[test]
+    fn hull_starts_at_blueprint_max() {
+        let mut w = World::new(5);
+        let id = w.spawn_class(ShipClass::Carrier, Team::Player, Vec3::ZERO);
+        let e = w.entity(id).unwrap();
+        assert_eq!(e.hull, w.registry.get(ShipClass::Carrier).max_hull);
     }
 
     #[test]

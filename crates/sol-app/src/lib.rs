@@ -10,10 +10,43 @@ use std::sync::Arc;
 
 use glam::{Mat4, Vec3, Vec4};
 use sol_render::{
-    BgVertex, CpuMesh, GpuMesh, MeshInstance, OrbitCamera, RenderOutcome, Renderer, StarInstance,
-    Vertex,
+    BgVertex, CpuMesh, GpuMesh, MeshInstance, OrbitCamera, OverlayVertex, RenderOutcome, Renderer,
+    StarInstance, Vertex,
 };
 use sol_sim::{Command, EntityId, Patrol, ShipClass, Team, World};
+
+/// Group-move arrangement applied by [`App::issue_move`]. Local UI state only
+/// (never enters the sim): it just maps a click to per-ship slot targets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Formation {
+    /// Class-segregated "military parade": carrier centered, capitals trailing,
+    /// frigates flanking either side, fighters/bombers on the wings. Falls back
+    /// to a grid if the selection has no carrier (mothership) to anchor it.
+    Parade,
+    /// Compact square grid (every ship gets a distinct cell).
+    Grid,
+    /// Single line abreast, perpendicular to the move direction.
+    Line,
+}
+
+impl Formation {
+    /// Cycle order for the HUD button / `F` key.
+    fn next(self) -> Self {
+        match self {
+            Formation::Parade => Formation::Grid,
+            Formation::Grid => Formation::Line,
+            Formation::Line => Formation::Parade,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Formation::Parade => "Parade",
+            Formation::Grid => "Grid",
+            Formation::Line => "Line",
+        }
+    }
+}
 use web_time::Instant;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
@@ -159,6 +192,15 @@ struct App {
     accumulator: f32,
     /// Locally-selected ships (UI state only; never enters the sim).
     selected: Vec<EntityId>,
+    /// Active group-move arrangement (cycled with `F` / the HUD button).
+    formation: Formation,
+    /// In-progress band-select rectangle as (start, current) in physical pixels.
+    /// Set while dragging (desktop LMB, or mobile with the box-select button
+    /// held); drawn as a HUD rectangle and finalized on release.
+    select_box: Option<((f64, f64), (f64, f64))>,
+    /// Mobile: true while the "Box Select" button is held, so a one-finger drag
+    /// draws a band box instead of orbiting the camera.
+    box_select_armed: bool,
     /// Latest cursor position in physical pixels.
     cursor: (f64, f64),
     /// Left/right mouse press positions, for click-vs-drag discrimination.
@@ -187,6 +229,9 @@ impl App {
             last_frame: None,
             accumulator: 0.0,
             selected: Vec::new(),
+            formation: Formation::Parade,
+            select_box: None,
+            box_select_armed: false,
             cursor: (0.0, 0.0),
             lmb_down: None,
             rmb_down: None,
@@ -308,15 +353,30 @@ impl App {
             0.0
         };
 
+        // Window drawable size, for projecting world points to the HUD overlay.
+        let (vw, vh) = match &self.window {
+            Some(w) => {
+                let s = w.inner_size();
+                (s.width.max(1) as f32, s.height.max(1) as f32)
+            }
+            None => (1.0, 1.0),
+        };
+
         // Interpolate each entity and group instances by class (one draw per
-        // distinct hull mesh) so the smooth 30 Hz render shows each class.
+        // distinct hull mesh). Selected ships also emit selection gizmos (a y=0
+        // ground circle + elevation pole + dashed move line) and a HUD health
+        // bar, so position, depth, and orders read at a glance.
         let mut groups: HashMap<ShipClass, Vec<MeshInstance>> = HashMap::new();
+        let mut gizmo_lines: Vec<BgVertex> = Vec::new();
+        let mut overlay_tris: Vec<OverlayVertex> = Vec::new();
+        let mut overlay_lines: Vec<OverlayVertex> = Vec::new();
         for e in &self.world.entities {
             let pos = e.prev_transform.pos.lerp(e.transform.pos, alpha);
             let rot = e.prev_transform.rot.slerp(e.transform.rot, alpha);
             let scale = Vec3::splat(class_scale(e.ship.class));
             let model = Mat4::from_scale_rotation_translation(scale, rot, pos);
-            let tint = if self.selected.contains(&e.id) {
+            let selected = self.selected.contains(&e.id);
+            let tint = if selected {
                 [0.45, 1.0, 0.65, 1.0]
             } else {
                 [1.0, 1.0, 1.0, 1.0]
@@ -325,9 +385,41 @@ impl App {
                 .entry(e.ship.class)
                 .or_default()
                 .push(MeshInstance::with_tint(model, tint));
+
+            if selected {
+                let r = self.world.registry.get(e.ship.class).radius;
+                let ground = Vec3::new(pos.x, 0.0, pos.z);
+                push_circle(&mut gizmo_lines, ground, r * 1.4 + 0.6, [0.3, 1.0, 0.6], 28);
+                push_line(&mut gizmo_lines, ground, pos, [0.2, 0.6, 0.4]);
+                if let Some(target) = e.order {
+                    push_dashes(&mut gizmo_lines, pos, target, [1.0, 0.75, 0.25], 1.2, 0.9);
+                    push_circle(&mut gizmo_lines, target, 0.8, [1.0, 0.75, 0.25], 16);
+                }
+                let max_hull = self.world.registry.get(e.ship.class).max_hull;
+                let frac = (e.hull / max_hull.max(1.0)).clamp(0.0, 1.0);
+                if let Some((sx, sy)) = self.project_to_screen(pos + Vec3::Y * (r * 0.8 + 1.2)) {
+                    push_health_bar(
+                        &mut overlay_tris,
+                        &mut overlay_lines,
+                        sx,
+                        sy,
+                        frac,
+                        (vw, vh),
+                    );
+                }
+            }
+        }
+
+        // Band-select rectangle (desktop LMB drag or mobile box-select hold).
+        if let Some((a, b)) = self.select_box {
+            let rect = [a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1)];
+            push_rect_px(&mut overlay_tris, rect, [0.3, 0.7, 1.0, 0.12], (vw, vh));
+            push_rect_outline_px(&mut overlay_lines, rect, [0.55, 0.85, 1.0, 0.9], (vw, vh));
         }
 
         let gfx = self.graphics.as_mut().unwrap();
+        gfx.renderer
+            .set_overlays(&gizmo_lines, &overlay_tris, &overlay_lines);
         let render_groups: Vec<(&GpuMesh, &[MeshInstance])> = groups
             .iter()
             .filter_map(|(class, insts)| gfx.meshes.get(class).map(|m| (m, insts.as_slice())))
@@ -376,6 +468,151 @@ fn formation_slots(center: Vec3, n: usize, spacing: f32) -> Vec<Vec3> {
     out
 }
 
+/// Single line abreast, centered on `center`, perpendicular to `forward`.
+fn line_slots(center: Vec3, forward: Vec3, n: usize, spacing: f32) -> Vec<Vec3> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let right = formation_right(forward);
+    (0..n)
+        .map(|i| center + right * ((i as f32 - (n as f32 - 1.0) * 0.5) * spacing))
+        .collect()
+}
+
+/// The rightward formation axis for a (XZ-plane) forward direction.
+fn formation_right(forward: Vec3) -> Vec3 {
+    let f = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
+    let f = if f.length_squared() < 1e-6 {
+        Vec3::Z
+    } else {
+        f
+    };
+    Vec3::new(f.z, 0.0, -f.x)
+}
+
+/// Alternate a paired class between right (+) and left (-) lanes of magnitude
+/// `mag`, so each such class fills both flanks evenly. State is keyed by `mag`.
+fn paired_column(sides: &mut HashMap<i32, bool>, mag: i32) -> i32 {
+    let go_left = sides.entry(mag).or_insert(false);
+    let col = if *go_left { -mag } else { mag };
+    *go_left = !*go_left;
+    col
+}
+
+/// Front-to-back ordering within a parade column (capitals lead, resourcers
+/// trail). Lower ranks sit nearer the front.
+fn class_depth_rank(class: ShipClass) -> u8 {
+    match class {
+        ShipClass::Carrier => 0,
+        ShipClass::CapitalDestroyer => 1,
+        ShipClass::FrigateGeneral => 2,
+        ShipClass::FrigateMissile => 3,
+        ShipClass::Corvette => 4,
+        ShipClass::Bomber => 5,
+        ShipClass::Fighter => 6,
+        ShipClass::Resourcer => 9,
+    }
+}
+
+// --- gizmo / HUD overlay geometry -----------------------------------------
+
+/// World-space line segment (two `BgVertex`, drawn with the line pipeline).
+fn push_line(v: &mut Vec<BgVertex>, a: Vec3, b: Vec3, color: [f32; 3]) {
+    v.push(BgVertex::new(a.to_array(), color));
+    v.push(BgVertex::new(b.to_array(), color));
+}
+
+/// World-space ring on the y=0 plane (XZ), as `segments` line segments.
+fn push_circle(v: &mut Vec<BgVertex>, center: Vec3, radius: f32, color: [f32; 3], segments: usize) {
+    let mut prev = center + Vec3::new(radius, 0.0, 0.0);
+    for k in 1..=segments {
+        let a = k as f32 / segments as f32 * std::f32::consts::TAU;
+        let p = center + Vec3::new(radius * a.cos(), 0.0, radius * a.sin());
+        push_line(v, prev, p, color);
+        prev = p;
+    }
+}
+
+/// World-space dashed segment from `a` to `b` (dash length + gap in units).
+fn push_dashes(v: &mut Vec<BgVertex>, a: Vec3, b: Vec3, color: [f32; 3], dash: f32, gap: f32) {
+    let total = b - a;
+    let len = total.length();
+    if len < 1e-3 {
+        return;
+    }
+    let dir = total / len;
+    let step = (dash + gap).max(0.01);
+    let mut t = 0.0;
+    while t < len {
+        let seg_end = (t + dash).min(len);
+        push_line(v, a + dir * t, a + dir * seg_end, color);
+        t += step;
+    }
+}
+
+/// Convert a physical-pixel point to clip-space NDC (origin top-left, y down).
+fn px_to_ndc(px: f32, py: f32, w: f32, h: f32) -> [f32; 2] {
+    [2.0 * px / w - 1.0, 1.0 - 2.0 * py / h]
+}
+
+/// Filled screen-space rectangle (two triangles). `rect` is `[x0, y0, x1, y1]`
+/// in physical pixels; `view` is the drawable `(width, height)`.
+fn push_rect_px(v: &mut Vec<OverlayVertex>, rect: [f64; 4], color: [f32; 4], view: (f32, f32)) {
+    let (w, h) = view;
+    let [x0, y0, x1, y1] = rect.map(|c| c as f32);
+    let tl = px_to_ndc(x0, y0, w, h);
+    let tr = px_to_ndc(x1, y0, w, h);
+    let br = px_to_ndc(x1, y1, w, h);
+    let bl = px_to_ndc(x0, y1, w, h);
+    for p in [tl, tr, br, tl, br, bl] {
+        v.push(OverlayVertex::new(p, color));
+    }
+}
+
+/// Outline of a screen-space rectangle (four line segments). See [`push_rect_px`].
+fn push_rect_outline_px(
+    v: &mut Vec<OverlayVertex>,
+    rect: [f64; 4],
+    color: [f32; 4],
+    view: (f32, f32),
+) {
+    let (w, h) = view;
+    let [x0, y0, x1, y1] = rect.map(|c| c as f32);
+    let tl = px_to_ndc(x0, y0, w, h);
+    let tr = px_to_ndc(x1, y0, w, h);
+    let br = px_to_ndc(x1, y1, w, h);
+    let bl = px_to_ndc(x0, y1, w, h);
+    for (a, b) in [(tl, tr), (tr, br), (br, bl), (bl, tl)] {
+        v.push(OverlayVertex::new(a, color));
+        v.push(OverlayVertex::new(b, color));
+    }
+}
+
+/// A health bar centered at screen point `(sx, sy)`: a dark backing, a fill of
+/// width proportional to `frac` (green full -> red empty), and a faint outline.
+fn push_health_bar(
+    tris: &mut Vec<OverlayVertex>,
+    lines: &mut Vec<OverlayVertex>,
+    sx: f64,
+    sy: f64,
+    frac: f32,
+    view: (f32, f32),
+) {
+    const HALF_W: f64 = 22.0;
+    const HALF_H: f64 = 3.5;
+    let (x0, y0, x1, y1) = (sx - HALF_W, sy - HALF_H, sx + HALF_W, sy + HALF_H);
+    push_rect_px(tris, [x0, y0, x1, y1], [0.0, 0.0, 0.0, 0.55], view);
+    let fill_x1 = x0 + 1.0 + (x1 - x0 - 2.0) * frac as f64;
+    let fill_color = [1.0 - frac, 0.25 + 0.7 * frac, 0.18, 0.95];
+    push_rect_px(
+        tris,
+        [x0 + 1.0, y0 + 1.0, fill_x1, y1 - 1.0],
+        fill_color,
+        view,
+    );
+    push_rect_outline_px(lines, [x0, y0, x1, y1], [0.7, 0.8, 0.92, 0.7], view);
+}
+
 impl App {
     /// Build a world-space ray from a screen pixel (selection + move picking).
     fn screen_ray(&self, sx: f64, sy: f64) -> Option<(Vec3, Vec3)> {
@@ -421,6 +658,39 @@ impl App {
         }
         let t = (plane_y - origin.y) / dir.y;
         (t > 0.0).then_some(origin + dir * t)
+    }
+
+    /// Project a world point to physical-pixel screen coords. Returns `None`
+    /// when the point is behind the camera (so HUD/band-box code skips it
+    /// rather than wrapping it onto the screen).
+    fn project_to_screen(&self, world: Vec3) -> Option<(f64, f64)> {
+        let size = self.window.as_ref()?.inner_size();
+        let (w, h) = (size.width.max(1) as f32, size.height.max(1) as f32);
+        let clip = self.camera.view_proj(w / h) * world.extend(1.0);
+        if clip.w <= 1e-6 {
+            return None;
+        }
+        let ndc = clip.truncate() / clip.w;
+        let px = (ndc.x * 0.5 + 0.5) * w;
+        let py = (1.0 - (ndc.y * 0.5 + 0.5)) * h;
+        Some((px as f64, py as f64))
+    }
+
+    /// XZ centroid of the current selection (the move-direction anchor).
+    fn selection_centroid(&self) -> Vec3 {
+        let mut sum = Vec3::ZERO;
+        let mut n = 0.0;
+        for id in &self.selected {
+            if let Some(e) = self.world.entity(*id) {
+                sum += e.transform.pos;
+                n += 1.0;
+            }
+        }
+        if n > 0.0 {
+            sum / n
+        } else {
+            Vec3::ZERO
+        }
     }
 
     fn selection_centroid_y(&self) -> f32 {
@@ -478,12 +748,128 @@ impl App {
             .map(|e| self.world.registry.get(e.ship.class).radius)
             .fold(1.0_f32, f32::max);
         let spacing = max_r * 2.5 + 1.0;
-        let slots = formation_slots(center, ids.len(), spacing);
-        for (id, slot) in ids.iter().zip(slots) {
+        let forward = self.formation_forward(center);
+        let assignments: Vec<(EntityId, Vec3)> = match self.formation {
+            Formation::Parade if self.selection_has_carrier() => {
+                self.parade_slots(&ids, center, forward, max_r)
+            }
+            Formation::Line => ids
+                .iter()
+                .copied()
+                .zip(line_slots(center, forward, ids.len(), spacing))
+                .collect(),
+            // Grid, or Parade without a mothership to anchor it.
+            _ => ids
+                .iter()
+                .copied()
+                .zip(formation_slots(center, ids.len(), spacing))
+                .collect(),
+        };
+        for (id, slot) in assignments {
             self.world.enqueue(Command::MoveTo {
-                entity: *id,
+                entity: id,
                 target: slot,
             });
+        }
+    }
+
+    fn selection_has_carrier(&self) -> bool {
+        self.selected.iter().any(|id| {
+            self.world
+                .entity(*id)
+                .is_some_and(|e| e.ship.class == ShipClass::Carrier)
+        })
+    }
+
+    /// Move direction for formations: from the selection centroid toward the
+    /// clicked center (XZ). Falls back to +Z when clicking near the centroid.
+    fn formation_forward(&self, center: Vec3) -> Vec3 {
+        let d = center - self.selection_centroid();
+        let d = Vec3::new(d.x, 0.0, d.z);
+        if d.length_squared() > 1e-3 {
+            d.normalize()
+        } else {
+            Vec3::Z
+        }
+    }
+
+    /// "Military parade": class-segregated columns oriented to `forward`. The
+    /// carrier holds front-center; capitals trail it, frigates take the inner
+    /// flanks, corvettes the next lanes, fighters/bombers the wings, and
+    /// resourcers the rear. Each (column, depth) cell is unique so ships never
+    /// stack (the sim's separation then only fine-tunes spacing).
+    fn parade_slots(
+        &self,
+        ids: &[EntityId],
+        center: Vec3,
+        forward: Vec3,
+        max_r: f32,
+    ) -> Vec<(EntityId, Vec3)> {
+        let right = formation_right(forward);
+        let col_space = max_r * 2.5 + 2.0;
+        let row_space = max_r * 2.2 + 2.0;
+
+        // Phase 1: assign each ship a signed column from its class, splitting
+        // paired-lane classes evenly left/right in selection order.
+        let mut sides = HashMap::<i32, bool>::new();
+        let mut by_col: std::collections::BTreeMap<i32, Vec<(EntityId, ShipClass)>> =
+            std::collections::BTreeMap::new();
+        for &id in ids {
+            let Some(e) = self.world.entity(id) else {
+                continue;
+            };
+            let class = e.ship.class;
+            let col = match class {
+                ShipClass::Carrier | ShipClass::CapitalDestroyer | ShipClass::Resourcer => 0,
+                ShipClass::FrigateGeneral | ShipClass::FrigateMissile => {
+                    paired_column(&mut sides, 1)
+                }
+                ShipClass::Corvette => paired_column(&mut sides, 2),
+                ShipClass::Fighter | ShipClass::Bomber => paired_column(&mut sides, 3),
+            };
+            by_col.entry(col).or_default().push((id, class));
+        }
+
+        // Phase 2: within each column, order by class (capitals front) and stack
+        // front-to-back so no two ships share a cell.
+        let mut out = Vec::with_capacity(ids.len());
+        for (col, mut ships) in by_col {
+            ships.sort_by_key(|(_, c)| class_depth_rank(*c));
+            for (depth, (id, _)) in ships.into_iter().enumerate() {
+                let pos = center + right * (col as f32 * col_space)
+                    - forward * (depth as f32 * row_space);
+                out.push((id, pos));
+            }
+        }
+        out
+    }
+
+    /// Replace the selection with all player ships whose projected center lies
+    /// inside the screen rectangle (physical pixels).
+    fn band_select(&mut self, a: (f64, f64), b: (f64, f64)) {
+        let (minx, maxx) = (a.0.min(b.0), a.0.max(b.0));
+        let (miny, maxy) = (a.1.min(b.1), a.1.max(b.1));
+        let mut hits = Vec::new();
+        for e in &self.world.entities {
+            if e.ship.team != Team::Player {
+                continue;
+            }
+            if let Some((px, py)) = self.project_to_screen(e.transform.pos) {
+                if px >= minx && px <= maxx && py >= miny && py <= maxy {
+                    hits.push(e.id);
+                }
+            }
+        }
+        self.selected = hits;
+    }
+
+    /// Finalize a band box: a real drag selects the enclosed ships; a tiny box
+    /// (a tap/click) falls back to single-pick select.
+    fn finalize_box(&mut self, a: (f64, f64), b: (f64, f64)) {
+        if dist2(a, b) >= CLICK_SLOP * CLICK_SLOP {
+            self.band_select(a, b);
+        } else {
+            self.on_select_click(b.0, b.1);
         }
     }
 
@@ -543,6 +929,11 @@ impl App {
                 UiCmd::SelectAll => self.select_all_player(),
                 UiCmd::Stop => self.stop_selected(),
                 UiCmd::Clear => self.selected.clear(),
+                UiCmd::CycleFormation => {
+                    self.formation = self.formation.next();
+                    set_formation_label(self.formation.label());
+                }
+                UiCmd::BoxSelectArm(on) => self.box_select_armed = on,
             }
         }
     }
@@ -577,11 +968,22 @@ impl ApplicationHandler for App {
             WindowEvent::MouseInput { button, state, .. } => {
                 let pos = self.cursor;
                 match (button, state) {
-                    (MouseButton::Left, ElementState::Pressed) => self.lmb_down = Some(pos),
+                    (MouseButton::Left, ElementState::Pressed) => {
+                        self.lmb_down = Some(pos);
+                        self.select_box = None;
+                    }
                     (MouseButton::Left, ElementState::Released) => {
-                        if let Some(p0) = self.lmb_down.take() {
-                            if dist2(p0, pos) < CLICK_SLOP * CLICK_SLOP {
-                                self.on_select_click(pos.0, pos.1);
+                        let started = self.lmb_down.take();
+                        let box_drag = self.select_box.take();
+                        if let Some(p0) = started {
+                            match box_drag {
+                                // A drag past the click slop is a band selection.
+                                Some(_) => self.band_select(p0, pos),
+                                None => {
+                                    if dist2(p0, pos) < CLICK_SLOP * CLICK_SLOP {
+                                        self.on_select_click(pos.0, pos.1);
+                                    }
+                                }
                             }
                         }
                     }
@@ -602,6 +1004,12 @@ impl ApplicationHandler for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x, position.y);
+                // An LMB drag past the click slop starts/updates a band box.
+                if let Some(p0) = self.lmb_down {
+                    if dist2(p0, self.cursor) >= CLICK_SLOP * CLICK_SLOP {
+                        self.select_box = Some((p0, self.cursor));
+                    }
+                }
                 self.controller
                     .on_cursor_moved(&mut self.camera, position.x, position.y);
             }
@@ -609,12 +1017,31 @@ impl ApplicationHandler for App {
                 self.controller.on_scroll(&mut self.camera, delta);
             }
             WindowEvent::Touch(t) => {
-                if let Some((tx, ty)) = self.on_touch_tap(t.phase, t.id, t.location.x, t.location.y)
-                {
-                    self.on_tap(tx, ty);
+                let (tx, ty) = (t.location.x, t.location.y);
+                if self.box_select_armed {
+                    // Box-select button held: a one-finger drag draws the band
+                    // box (no orbit/tap) and selects the enclosed ships.
+                    match t.phase {
+                        TouchPhase::Started => self.select_box = Some(((tx, ty), (tx, ty))),
+                        TouchPhase::Moved => {
+                            if let Some((s, _)) = self.select_box {
+                                self.select_box = Some((s, (tx, ty)));
+                            }
+                        }
+                        TouchPhase::Ended => {
+                            if let Some((a, b)) = self.select_box.take() {
+                                self.finalize_box(a, b);
+                            }
+                        }
+                        TouchPhase::Cancelled => self.select_box = None,
+                    }
+                } else {
+                    if let Some((px, py)) = self.on_touch_tap(t.phase, t.id, tx, ty) {
+                        self.on_tap(px, py);
+                    }
+                    self.controller
+                        .on_touch(&mut self.camera, t.phase, t.id, tx, ty);
                 }
-                self.controller
-                    .on_touch(&mut self.camera, t.phase, t.id, t.location.x, t.location.y);
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 use winit::keyboard::{Key, NamedKey};
@@ -622,6 +1049,12 @@ impl ApplicationHandler for App {
                     match event.logical_key.as_ref() {
                         Key::Character("a") | Key::Character("A") => self.select_all_player(),
                         Key::Character("s") | Key::Character("S") => self.stop_selected(),
+                        // `C` cycles formations; `F` is reserved for focus-on-
+                        // selection in the design's binding table (design.md §9.5).
+                        Key::Character("c") | Key::Character("C") => {
+                            self.formation = self.formation.next();
+                            log::info!("formation: {}", self.formation.label());
+                        }
                         Key::Named(NamedKey::Escape) => self.selected.clear(),
                         _ => {}
                     }
@@ -868,6 +1301,10 @@ enum UiCmd {
     SelectAll,
     Stop,
     Clear,
+    CycleFormation,
+    /// Mobile: arm (true) / disarm (false) the band-box drag while the button
+    /// is held.
+    BoxSelectArm(bool),
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -891,11 +1328,36 @@ fn wire_dom_controls() {
         ("sol-select-all", UiCmd::SelectAll),
         ("sol-stop", UiCmd::Stop),
         ("sol-clear", UiCmd::Clear),
+        ("sol-formation", UiCmd::CycleFormation),
     ] {
         if let Some(el) = doc.get_element_by_id(id) {
             let cb = Closure::<dyn FnMut()>::new(move || push_ui(cmd));
             let _ = el.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref());
             cb.forget();
+        }
+    }
+    // Box-select is a press-and-hold: arm on pointer down, disarm on release
+    // (or cancel/leave), so a finger drag on the canvas draws the band box.
+    if let Some(el) = doc.get_element_by_id("sol-box-select") {
+        for (event, on) in [
+            ("pointerdown", true),
+            ("pointerup", false),
+            ("pointercancel", false),
+            ("pointerleave", false),
+        ] {
+            let cb = Closure::<dyn FnMut()>::new(move || push_ui(UiCmd::BoxSelectArm(on)));
+            let _ = el.add_event_listener_with_callback(event, cb.as_ref().unchecked_ref());
+            cb.forget();
+        }
+    }
+}
+
+/// Update the formation HUD button label to the active formation.
+#[cfg(target_arch = "wasm32")]
+fn set_formation_label(name: &str) {
+    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+        if let Some(el) = doc.get_element_by_id("sol-formation") {
+            el.set_text_content(Some(&format!("Form: {name}")));
         }
     }
 }

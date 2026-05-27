@@ -144,6 +144,82 @@ impl StarInstance {
     }
 }
 
+/// A screen-space HUD vertex: clip-space (NDC) 2D position + RGBA color. Used
+/// for the band-selection box and health bars (projected to NDC on the CPU and
+/// alpha-blended over the scene). Shared by the overlay line and triangle
+/// pipelines.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct OverlayVertex {
+    pub pos: [f32; 2],
+    pub color: [f32; 4],
+}
+
+impl OverlayVertex {
+    pub fn new(pos: [f32; 2], color: [f32; 4]) -> Self {
+        Self { pos, color }
+    }
+
+    fn layout() -> wgpu::VertexBufferLayout<'static> {
+        const ATTRS: [wgpu::VertexAttribute; 2] =
+            wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4];
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<OverlayVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &ATTRS,
+        }
+    }
+}
+
+/// A reusable dynamic vertex buffer that grows to fit per-frame overlay
+/// geometry (gizmo lines and HUD vertices change every frame).
+struct DynamicBuffer {
+    buffer: wgpu::Buffer,
+    capacity: u64,
+    count: u32,
+}
+
+impl DynamicBuffer {
+    fn new(device: &wgpu::Device, label: &'static str, capacity: u64) -> Self {
+        Self {
+            buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: capacity,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            capacity,
+            count: 0,
+        }
+    }
+
+    /// Upload `data`, growing the buffer if needed. Records the vertex count.
+    fn upload<T: Pod>(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        label: &'static str,
+        data: &[T],
+    ) {
+        self.count = data.len() as u32;
+        if data.is_empty() {
+            return;
+        }
+        let bytes: &[u8] = bytemuck::cast_slice(data);
+        let needed = bytes.len() as u64;
+        if needed > self.capacity {
+            self.capacity = needed.next_power_of_two();
+            self.buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: self.capacity,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        queue.write_buffer(&self.buffer, 0, bytes);
+    }
+}
+
 /// Uploaded background geometry: nebula sphere, star sprites, grid points.
 struct Environment {
     nebula_vbuf: wgpu::Buffer,
@@ -188,6 +264,16 @@ pub struct Renderer {
     star_pipeline: wgpu::RenderPipeline,
     points_near_pipeline: wgpu::RenderPipeline,
     environment: Option<Environment>,
+
+    /// World-space line gizmos (selection ground-circle, elevation pole, dashed
+    /// move line); drawn on top of the scene so selection stays visible.
+    line_pipeline: wgpu::RenderPipeline,
+    gizmo_lines: DynamicBuffer,
+    /// Screen-space HUD overlays (band-select box + health bars), clip-space.
+    overlay_tri_pipeline: wgpu::RenderPipeline,
+    overlay_line_pipeline: wgpu::RenderPipeline,
+    overlay_tris: DynamicBuffer,
+    overlay_lines: DynamicBuffer,
 
     /// Reusable per-frame instance buffer (grown as needed).
     instance_buffer: wgpu::Buffer,
@@ -465,6 +551,51 @@ impl Renderer {
             cache: None,
         });
 
+        // World-space line gizmos: reuse the vertex-colored background shader,
+        // drawn as line segments on top of the scene (depth test Always, no
+        // write) so the selection circle/pole/move line stay visible.
+        let line_pipeline = bg_pipeline(
+            &device,
+            &bg_layout,
+            &bg_shader,
+            config.format,
+            wgpu::PrimitiveTopology::LineList,
+            false,
+            wgpu::CompareFunction::Always,
+            "fs_main",
+        );
+
+        // Screen-space HUD overlay pipelines (clip-space, no camera, alpha
+        // blended): one for filled triangles (health bars / box fill), one for
+        // line segments (box outline).
+        let overlay_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("overlay shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../../shaders/overlay.wgsl").into()),
+        });
+        let overlay_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("overlay pipeline layout"),
+            bind_group_layouts: &[],
+            immediate_size: 0,
+        });
+        let overlay_tri_pipeline = overlay_pipeline(
+            &device,
+            &overlay_layout,
+            &overlay_shader,
+            config.format,
+            wgpu::PrimitiveTopology::TriangleList,
+        );
+        let overlay_line_pipeline = overlay_pipeline(
+            &device,
+            &overlay_layout,
+            &overlay_shader,
+            config.format,
+            wgpu::PrimitiveTopology::LineList,
+        );
+
+        let gizmo_lines = DynamicBuffer::new(&device, "gizmo lines", 4096);
+        let overlay_tris = DynamicBuffer::new(&device, "overlay tris", 4096);
+        let overlay_lines = DynamicBuffer::new(&device, "overlay lines", 1024);
+
         let instance_capacity = 256;
         let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("instance buffer"),
@@ -488,6 +619,12 @@ impl Renderer {
             star_pipeline,
             points_near_pipeline,
             environment: None,
+            line_pipeline,
+            gizmo_lines,
+            overlay_tri_pipeline,
+            overlay_line_pipeline,
+            overlay_tris,
+            overlay_lines,
             instance_buffer,
             instance_capacity,
         })
@@ -646,6 +783,25 @@ impl Renderer {
         });
     }
 
+    /// Upload per-frame HUD overlays, consumed by the next `render_groups`:
+    /// `gizmo_lines` are world-space line segments (selection circle / elevation
+    /// pole / dashed move line); `overlay_tris` and `overlay_lines` are
+    /// clip-space (NDC) HUD geometry (health bars + band-select box). Pass empty
+    /// slices to clear. Call each frame before `render_groups`.
+    pub fn set_overlays(
+        &mut self,
+        gizmo_lines: &[BgVertex],
+        overlay_tris: &[OverlayVertex],
+        overlay_lines: &[OverlayVertex],
+    ) {
+        self.gizmo_lines
+            .upload(&self.device, &self.queue, "gizmo lines", gizmo_lines);
+        self.overlay_tris
+            .upload(&self.device, &self.queue, "overlay tris", overlay_tris);
+        self.overlay_lines
+            .upload(&self.device, &self.queue, "overlay lines", overlay_lines);
+    }
+
     /// Draw several mesh groups in one pass: each group is a mesh plus the
     /// instances drawn with it, so the whole fleet renders with a single clear.
     /// Groups share one instance buffer via contiguous per-group ranges.
@@ -657,8 +813,12 @@ impl Renderer {
     ) -> RenderOutcome {
         // Update camera uniform.
         let light_dir = Vec3::from(LIGHT_DIR).normalize();
-        let uniform =
-            CameraUniform::new(camera.view_proj(self.aspect()), light_dir, Vec3::ONE, self.aspect());
+        let uniform = CameraUniform::new(
+            camera.view_proj(self.aspect()),
+            light_dir,
+            Vec3::ONE,
+            self.aspect(),
+        );
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
 
@@ -764,6 +924,28 @@ impl Renderer {
                 pass.draw_indexed(0..mesh.index_count, 0, start..end);
             }
 
+            // World-space selection gizmos on top of the ships (camera-transformed
+            // line segments, depth test Always).
+            if self.gizmo_lines.count > 0 {
+                pass.set_pipeline(&self.line_pipeline);
+                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                pass.set_vertex_buffer(0, self.gizmo_lines.buffer.slice(..));
+                pass.draw(0..self.gizmo_lines.count, 0..1);
+            }
+
+            // Screen-space HUD: filled triangles (health bars + box fill) then
+            // line outlines (box border). No camera, alpha blended.
+            if self.overlay_tris.count > 0 {
+                pass.set_pipeline(&self.overlay_tri_pipeline);
+                pass.set_vertex_buffer(0, self.overlay_tris.buffer.slice(..));
+                pass.draw(0..self.overlay_tris.count, 0..1);
+            }
+            if self.overlay_lines.count > 0 {
+                pass.set_pipeline(&self.overlay_line_pipeline);
+                pass.set_vertex_buffer(0, self.overlay_lines.buffer.slice(..));
+                pass.draw(0..self.overlay_lines.count, 0..1);
+            }
+
             // TODO: egui overlay pass goes here once the HUD lands (design.md §10).
         }
 
@@ -840,6 +1022,57 @@ fn bg_pipeline(
             format: DEPTH_FORMAT,
             depth_write_enabled: Some(depth_write),
             depth_compare: Some(depth_compare),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// Build a clip-space HUD overlay pipeline (no camera bind group, alpha
+/// blended, depth always/no-write so it draws on top). `topology` selects
+/// filled triangles (health bars) vs line segments (box outline).
+fn overlay_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+    topology: wgpu::PrimitiveTopology,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("overlay pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            buffers: &[OverlayVertex::layout()],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Always),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
