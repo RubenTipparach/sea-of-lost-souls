@@ -21,7 +21,9 @@ impl Mesh {
     /// from the side the normal points toward). Splits into two triangles. Each
     /// face spans the full [0,1] UV range so the baked pixel-art tiles per panel.
     fn push_quad(&mut self, a: Vec3, b: Vec3, c: Vec3, d: Vec3) {
-        let normal = (b - a).cross(c - a).normalize_or_zero();
+        // Outward normal and reversed (a,c,b / a,d,c) winding so the face renders
+        // front-facing under the renderer's CCW-front, back-cull pipeline.
+        let normal = (c - a).cross(b - a).normalize_or_zero();
         let base = self.positions.len() as u32;
         let uvs = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
         for (v, uv) in [a, b, c, d].into_iter().zip(uvs) {
@@ -29,9 +31,8 @@ impl Mesh {
             self.normals.push(normal.to_array());
             self.uvs.push(uv);
         }
-        // a,b,c and a,c,d
         self.indices
-            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+            .extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
     }
 
     /// Append an axis-aligned box spanning `min..max`, with outward normals.
@@ -92,7 +93,7 @@ impl Mesh {
         let tl = Vec3::new(-half, half, z_base);
         // Four triangular faces (wind so normals face outward/forward).
         for (p0, p1) in [(br, bl), (tr, br), (tl, tr), (bl, tl)] {
-            let normal = (p1 - p0).cross(apex - p0).normalize_or_zero();
+            let normal = (apex - p0).cross(p1 - p0).normalize_or_zero();
             let base = self.positions.len() as u32;
             let uvs = [[0.0, 0.0], [1.0, 0.0], [0.5, 1.0]];
             for (v, uv) in [p0, p1, apex].into_iter().zip(uvs) {
@@ -100,7 +101,7 @@ impl Mesh {
                 self.normals.push(normal.to_array());
                 self.uvs.push(uv);
             }
-            self.indices.extend_from_slice(&[base, base + 1, base + 2]);
+            self.indices.extend_from_slice(&[base, base + 2, base + 1]);
         }
     }
 }
