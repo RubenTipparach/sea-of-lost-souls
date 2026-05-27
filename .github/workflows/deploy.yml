@@ -16,10 +16,13 @@ permissions:
   pages: write
   id-token: write
 
-# One shared Pages deployment; cancel an in-flight deploy when a newer push
-# arrives so the live site always tracks the latest commit.
+# Cancel an in-flight run only when a newer run for the SAME ref arrives (so a
+# newer push to a branch supersedes its own older deploy). The group is keyed by
+# ref on purpose: a shared "pages" group made the PR-verification run cancel the
+# deploying push run (push and PR have different refs), which silently skipped
+# every deploy. The github-pages environment serializes the actual deployments.
 concurrency:
-  group: pages
+  group: pages-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
