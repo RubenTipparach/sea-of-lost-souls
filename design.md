@@ -1301,6 +1301,14 @@ Three deliverables, all live on GitHub Pages from the first commit:
   set X/Z on the disk, drag for altitude, ships move there with simple
   Newtonian-ish steering on the **fixed-timestep sim** with render
   interpolation.
+- **Salvage gathering (prototype economy):** a seeded belt of **procedural
+  asteroids** (displaced icospheres, instanced; the permitted procedural case,
+  [§14](#14-asset-strategy-static-vs-procedural)) acts as salvage sources. With a
+  **resourcer** selected, clicking an asteroid sends it to harvest; it fills its
+  cargo, returns to the mothership to deposit, and the banked **Salvage** counter
+  rises. All gather/harvest/deposit state lives in the deterministic sim (node
+  amounts and the salvage pool are in the checksum); asteroid positions/amounts
+  are seeded so they are identical across peers.
 - Minimal **egui HUD:** selection list + a stub power/health panel
   ([§10](#10-ui--hud)).
 - *(No combat, no real subsystems yet - movement, selection, camera, and the

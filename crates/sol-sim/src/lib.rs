@@ -30,6 +30,9 @@ pub const TICK_DT: f32 = 1.0 / TICK_HZ as f32;
 const SEPARATION_SPACING: f32 = 1.15;
 const SEPARATION_GAIN: f32 = 3.0;
 
+/// Salvage harvested per second while a resourcer sits in a node's gather range.
+const HARVEST_RATE: f32 = 60.0;
+
 /// World-space position and orientation of an entity.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Transform {
@@ -136,6 +139,9 @@ pub struct Blueprint {
     /// Hull points at full health. Combat (later phase) drains the entity's
     /// `hull`; the HUD reads `hull / max_hull` for the health bar.
     pub max_hull: f32,
+    /// Salvage cargo capacity. Only resourcers carry (> 0); a ship with zero
+    /// capacity cannot accept a gather order.
+    pub cargo: f32,
 }
 
 /// Read-only table of per-class blueprints. Lookups are by key (deterministic);
@@ -149,16 +155,56 @@ impl ShipRegistry {
     /// Build the registry with Phase 1 placeholder stats (see the plan's ship
     /// suite table). Tuned later; the point now is that the sim reads them.
     pub fn with_defaults() -> Self {
-        // (class, mass t, max_speed, accel, turn deg/s, crew, radius, max_hull).
-        // Speeds are tuned for the current demo scene (tens of units across), not
-        // the plan's eventual large-world values; radius drives separation and
-        // picking; max_hull is placeholder until combat tuning lands.
-        type Row = (ShipClass, f32, f32, f32, f32, u32, f32, f32);
+        // (class, mass t, max_speed, accel, turn deg/s, crew, radius, max_hull,
+        // cargo). Speeds are tuned for the current demo scene (tens of units
+        // across), not the plan's eventual large-world values; radius drives
+        // separation and picking; max_hull/cargo are placeholders until tuning.
+        type Row = (ShipClass, f32, f32, f32, f32, u32, f32, f32, f32);
         let rows: [Row; 8] = [
-            (ShipClass::Fighter, 18.0, 16.0, 24.0, 130.0, 2, 1.0, 80.0),
-            (ShipClass::Bomber, 30.0, 12.0, 16.0, 90.0, 3, 1.5, 120.0),
-            (ShipClass::Corvette, 220.0, 10.0, 12.0, 70.0, 6, 2.25, 400.0),
-            (ShipClass::Resourcer, 140.0, 8.0, 9.0, 55.0, 3, 2.5, 300.0),
+            (
+                ShipClass::Fighter,
+                18.0,
+                16.0,
+                24.0,
+                130.0,
+                2,
+                1.0,
+                80.0,
+                0.0,
+            ),
+            (
+                ShipClass::Bomber,
+                30.0,
+                12.0,
+                16.0,
+                90.0,
+                3,
+                1.5,
+                120.0,
+                0.0,
+            ),
+            (
+                ShipClass::Corvette,
+                220.0,
+                10.0,
+                12.0,
+                70.0,
+                6,
+                2.25,
+                400.0,
+                0.0,
+            ),
+            (
+                ShipClass::Resourcer,
+                140.0,
+                8.0,
+                9.0,
+                55.0,
+                3,
+                2.5,
+                300.0,
+                200.0,
+            ),
             (
                 ShipClass::FrigateGeneral,
                 4000.0,
@@ -168,6 +214,7 @@ impl ShipRegistry {
                 18,
                 4.25,
                 2000.0,
+                0.0,
             ),
             (
                 ShipClass::FrigateMissile,
@@ -178,6 +225,7 @@ impl ShipRegistry {
                 18,
                 4.5,
                 1900.0,
+                0.0,
             ),
             (
                 ShipClass::CapitalDestroyer,
@@ -188,6 +236,7 @@ impl ShipRegistry {
                 60,
                 6.0,
                 8000.0,
+                0.0,
             ),
             (
                 ShipClass::Carrier,
@@ -198,10 +247,11 @@ impl ShipRegistry {
                 120,
                 8.0,
                 20000.0,
+                0.0,
             ),
         ];
         let mut blueprints = HashMap::new();
-        for (class, mass, max_speed, accel, turn_rate_deg, crew, radius, max_hull) in rows {
+        for (class, mass, max_speed, accel, turn_rate_deg, crew, radius, max_hull, cargo) in rows {
             blueprints.insert(
                 class,
                 Blueprint {
@@ -213,6 +263,7 @@ impl ShipRegistry {
                     crew,
                     radius,
                     max_hull,
+                    cargo,
                 },
             );
         }
@@ -274,6 +325,32 @@ impl Patrol {
     }
 }
 
+/// Stable id for a resource node (asteroid / salvage site).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct NodeId(pub u32);
+
+/// A harvestable salvage site. Positions/amounts are seeded (deterministic for
+/// gameplay); resourcers drain `amount` down to zero. Purely sim state.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ResourceNode {
+    pub id: NodeId,
+    pub pos: Vec3,
+    pub amount: f32,
+    pub max_amount: f32,
+    /// Footprint radius (separation/picking and the gather standoff distance).
+    pub radius: f32,
+}
+
+/// A resourcer's active gather task: harvest `node` until full, return to the
+/// mothership to deposit, repeat until the node is empty.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Gather {
+    pub node: NodeId,
+    pub carrying: f32,
+    /// True while heading back to deposit; false while harvesting.
+    pub returning: bool,
+}
+
 /// One simulated entity. `prev_transform` holds the previous step's transform
 /// so the renderer can interpolate; the sim itself never reads it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -290,6 +367,8 @@ pub struct Entity {
     pub order: Option<Vec3>,
     /// Optional circular patrol; when set, the step drives the transform.
     pub patrol: Option<Patrol>,
+    /// Active gather task (resourcers only); overrides move orders/patrol.
+    pub gather: Option<Gather>,
 }
 
 /// A player/AI order. Orders are queued and applied at fixed-step boundaries
@@ -302,8 +381,10 @@ pub enum Command {
     MoveTo { entity: EntityId, target: Vec3 },
     /// Set an entity's linear velocity directly (used by tests).
     SetVelocity { entity: EntityId, linear: Vec3 },
-    /// Halt an entity and clear any move order.
+    /// Halt an entity and clear any move/gather order.
     Stop { entity: EntityId },
+    /// Send a resourcer to harvest a node (ignored for ships with no cargo).
+    Gather { entity: EntityId, node: NodeId },
 }
 
 /// The deterministic simulation world.
@@ -314,11 +395,16 @@ pub enum Command {
 #[derive(Clone, Debug)]
 pub struct World {
     pub entities: Vec<Entity>,
+    /// Harvestable salvage sites (asteroids); drained by resourcers.
+    pub resource_nodes: Vec<ResourceNode>,
+    /// Salvage banked at the mothership (the player's resource pool).
+    pub salvage: f32,
     pub registry: ShipRegistry,
     pub rng: Rng,
     /// Number of fixed steps taken; part of the determinism checksum.
     pub tick: u64,
     next_id: u32,
+    next_node_id: u32,
     /// Orders accumulated since the last step, drained at the next step.
     pending: Vec<Command>,
 }
@@ -328,12 +414,34 @@ impl World {
     pub fn new(seed: u64) -> Self {
         Self {
             entities: Vec::new(),
+            resource_nodes: Vec::new(),
+            salvage: 0.0,
             registry: ShipRegistry::with_defaults(),
             rng: Rng::new(seed),
             tick: 0,
             next_id: 0,
+            next_node_id: 0,
             pending: Vec::new(),
         }
+    }
+
+    /// Spawn a harvestable resource node, returning its stable id.
+    pub fn spawn_resource_node(&mut self, pos: Vec3, amount: f32, radius: f32) -> NodeId {
+        let id = NodeId(self.next_node_id);
+        self.next_node_id += 1;
+        self.resource_nodes.push(ResourceNode {
+            id,
+            pos,
+            amount,
+            max_amount: amount,
+            radius,
+        });
+        id
+    }
+
+    /// Look up a resource node by id.
+    pub fn node(&self, id: NodeId) -> Option<&ResourceNode> {
+        self.resource_nodes.iter().find(|n| n.id == id)
     }
 
     /// Spawn a ship at `transform` and return its stable id.
@@ -350,6 +458,7 @@ impl World {
             hull: max_hull,
             order: None,
             patrol: None,
+            gather: None,
         });
         id
     }
@@ -406,6 +515,7 @@ impl World {
                     if let Some(e) = self.entity_mut(entity) {
                         e.order = Some(target);
                         e.patrol = None; // a direct order overrides a patrol
+                        e.gather = None; // and cancels any gather task
                     }
                 }
                 Command::SetVelocity { entity, linear } => {
@@ -416,7 +526,25 @@ impl World {
                 Command::Stop { entity } => {
                     if let Some(e) = self.entity_mut(entity) {
                         e.order = None;
+                        e.gather = None;
                         e.velocity.linear = Vec3::ZERO;
+                    }
+                }
+                Command::Gather { entity, node } => {
+                    // Only ships with cargo capacity (resourcers) can gather.
+                    let can = self
+                        .entity(entity)
+                        .is_some_and(|e| self.registry.get(e.ship.class).cargo > 0.0);
+                    if can {
+                        if let Some(e) = self.entity_mut(entity) {
+                            e.gather = Some(Gather {
+                                node,
+                                carrying: 0.0,
+                                returning: false,
+                            });
+                            e.order = None;
+                            e.patrol = None;
+                        }
                     }
                 }
             }
@@ -436,8 +564,16 @@ impl World {
             })
             .collect();
 
-        // 3) Advance each entity. Patrols follow their circle; otherwise run
-        // arrive + separation steering, clamped to the blueprint's limits.
+        // Deposit point: the player's mothership (first carrier in spawn order).
+        let depot: Option<(Vec3, f32)> = self
+            .entities
+            .iter()
+            .find(|e| e.ship.class == ShipClass::Carrier && e.ship.team == Team::Player)
+            .map(|e| (e.transform.pos, self.registry.get(e.ship.class).radius));
+
+        // 3) Advance each entity. Patrols follow their circle; otherwise steer
+        // toward a goal (a gather target approached to just outside its surface,
+        // else a manual move order) with arrive + separation, clamped to limits.
         for e in &mut self.entities {
             e.prev_transform = e.transform;
 
@@ -453,15 +589,44 @@ impl World {
             let bp = self.registry.get(e.ship.class);
             let my_pos = e.transform.pos;
 
-            // Desired velocity is zero unless we have a move order; an arrived or
-            // idle ship eases to a stop (it never separates, so it holds station).
+            // This step's steering goal, and whether arriving clears a move order.
+            let mut goal: Option<Vec3> = None;
+            let mut clear_order = false;
+            if let Some(g) = e.gather {
+                let target = if g.returning {
+                    depot
+                } else {
+                    self.resource_nodes
+                        .iter()
+                        .find(|n| n.id == g.node)
+                        .map(|n| (n.pos, n.radius))
+                };
+                if let Some((center, tr)) = target {
+                    let to = center - my_pos;
+                    let d = to.length();
+                    let standoff = tr + bp.radius + 0.6;
+                    if d > standoff {
+                        goal = Some(center - to / d.max(1e-4) * standoff);
+                    }
+                    // Else already in range: park (no goal); the harvest pass
+                    // below performs the extraction / deposit.
+                }
+            } else if let Some(target) = e.order {
+                goal = Some(target);
+                clear_order = true;
+            }
+
+            // Desired velocity is zero unless we have a goal; an arrived or idle
+            // ship eases to a stop (it never separates, so it holds station).
             let mut desired = Vec3::ZERO;
-            if let Some(target) = e.order {
+            if let Some(target) = goal {
                 let to = target - my_pos;
                 let dist = to.length();
                 let arrive = bp.radius * 0.5 + 0.3;
                 if dist <= arrive {
-                    e.order = None;
+                    if clear_order {
+                        e.order = None;
+                    }
                 } else {
                     // Arrive: ease down inside the stopping distance.
                     let slowing = (bp.max_speed * bp.max_speed) / (2.0 * bp.accel.max(0.01));
@@ -509,6 +674,65 @@ impl World {
             }
         }
 
+        // 4) Resource harvest / deposit, in a separate pass so the node list and
+        // the salvage pool aren't aliased with the entity iteration. Stable
+        // (entity index) order keeps it deterministic.
+        for i in 0..self.entities.len() {
+            let Some(g) = self.entities[i].gather else {
+                continue;
+            };
+            let pos = self.entities[i].transform.pos;
+            let bp = self.registry.get(self.entities[i].ship.class);
+            let (ship_r, cargo) = (bp.radius, bp.cargo);
+
+            if g.returning {
+                // Deposit at the mothership, then head back out (or finish).
+                if let Some((dpos, dr)) = depot {
+                    if (pos - dpos).length() <= dr + ship_r + 2.5 {
+                        self.salvage += g.carrying;
+                        let empty = self
+                            .resource_nodes
+                            .iter()
+                            .find(|n| n.id == g.node)
+                            .is_none_or(|n| n.amount <= 0.0);
+                        let gm = self.entities[i].gather.as_mut().unwrap();
+                        gm.carrying = 0.0;
+                        if empty {
+                            self.entities[i].gather = None;
+                        } else {
+                            gm.returning = false;
+                        }
+                    }
+                }
+            } else if let Some(n) = self.resource_nodes.iter_mut().find(|n| n.id == g.node) {
+                if n.amount <= 0.0 {
+                    let gm = self.entities[i].gather.as_mut().unwrap();
+                    if gm.carrying > 0.0 {
+                        gm.returning = true;
+                    } else {
+                        self.entities[i].gather = None;
+                    }
+                } else if (pos - n.pos).length() <= n.radius + ship_r + 2.5 {
+                    let want = (HARVEST_RATE * dt).min(cargo - g.carrying).max(0.0);
+                    let got = want.min(n.amount);
+                    n.amount -= got;
+                    let gm = self.entities[i].gather.as_mut().unwrap();
+                    gm.carrying += got;
+                    if gm.carrying >= cargo - 1e-3 || n.amount <= 0.0 {
+                        gm.returning = true;
+                    }
+                }
+            } else {
+                // The node vanished: bank what we carry, else drop the task.
+                let gm = self.entities[i].gather.as_mut().unwrap();
+                if gm.carrying > 0.0 {
+                    gm.returning = true;
+                } else {
+                    self.entities[i].gather = None;
+                }
+            }
+        }
+
         self.tick += 1;
     }
 
@@ -536,6 +760,12 @@ impl World {
                 h = fnv1a(h, v.to_bits());
             }
             h = fnv1a(h, e.hull.to_bits());
+            h = fnv1a(h, e.gather.map(|g| g.carrying).unwrap_or(0.0).to_bits());
+        }
+        h = fnv1a(h, self.salvage.to_bits());
+        for n in &self.resource_nodes {
+            h = fnv1a(h, n.id.0);
+            h = fnv1a(h, n.amount.to_bits());
         }
         h
     }
@@ -725,6 +955,53 @@ mod tests {
             "ships still overlapping ({} apart, radius {r})",
             (pa - pb).length()
         );
+    }
+
+    #[test]
+    fn resourcer_harvests_node_and_banks_salvage() {
+        let mut w = World::new(9);
+        w.spawn_class(ShipClass::Carrier, Team::Player, Vec3::ZERO); // depot
+        let r = w.spawn_class(ShipClass::Resourcer, Team::Player, Vec3::new(6.0, 0.0, 0.0));
+        let node = w.spawn_resource_node(Vec3::new(40.0, 0.0, 0.0), 150.0, 3.0);
+        w.enqueue(Command::Gather { entity: r, node });
+        // Long enough for a full out-harvest-return-deposit cycle.
+        for _ in 0..(TICK_HZ * 60) {
+            w.step(TICK_DT);
+        }
+        assert_eq!(w.node(node).unwrap().amount, 0.0, "node not depleted");
+        assert!(
+            (w.salvage - 150.0).abs() < 1.0,
+            "salvage not banked: {}",
+            w.salvage
+        );
+        // Task clears once the node is exhausted.
+        assert!(w.entity(r).unwrap().gather.is_none());
+    }
+
+    #[test]
+    fn non_resourcer_cannot_gather() {
+        let mut w = World::new(1);
+        let f = w.spawn_class(ShipClass::Fighter, Team::Player, Vec3::ZERO);
+        let node = w.spawn_resource_node(Vec3::new(20.0, 0.0, 0.0), 100.0, 3.0);
+        w.enqueue(Command::Gather { entity: f, node });
+        w.step(TICK_DT);
+        assert!(w.entity(f).unwrap().gather.is_none(), "fighter took gather");
+    }
+
+    #[test]
+    fn gather_is_deterministic() {
+        fn run() -> u64 {
+            let mut w = World::new(11);
+            w.spawn_class(ShipClass::Carrier, Team::Player, Vec3::ZERO);
+            let r = w.spawn_class(ShipClass::Resourcer, Team::Player, Vec3::new(6.0, 0.0, 0.0));
+            let node = w.spawn_resource_node(Vec3::new(35.0, 2.0, -10.0), 400.0, 3.5);
+            w.enqueue(Command::Gather { entity: r, node });
+            for _ in 0..(TICK_HZ * 20) {
+                w.step(TICK_DT);
+            }
+            w.checksum()
+        }
+        assert_eq!(run(), run());
     }
 
     #[test]

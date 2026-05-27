@@ -116,6 +116,20 @@
       #sol-shift-hint[hidden] {
         display: none;
       }
+      /* Resource readout: banked salvage, top-left. */
+      #sol-resources {
+        position: fixed;
+        left: 10px;
+        top: 10px;
+        z-index: 21;
+        background: rgba(11, 26, 43, 0.78);
+        border: 1px solid #2b6cb0;
+        border-radius: 8px;
+        color: #ffe2a8;
+        font: 700 15px/1 system-ui, sans-serif;
+        padding: 9px 12px;
+        pointer-events: none;
+      }
       /* Mobile camera pad: a pan joystick + a spring-to-center elevation slider.
          Desktop uses WASD / arrows / edge-scroll instead, so the app removes the
          pad on non-mobile. */
@@ -264,6 +278,7 @@
         refresh();
       })();
     </script>
+    <div id="sol-resources">Salvage: 0</div>
     <div id="sol-controls">
       <button id="sol-select-all" type="button">Select All</button>
       <button id="sol-box-select" type="button">Box Select</button>

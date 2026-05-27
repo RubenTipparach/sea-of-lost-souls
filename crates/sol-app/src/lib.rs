@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use glam::{Mat4, Vec3, Vec4};
+use glam::{EulerRot, Mat4, Quat, Vec3, Vec4};
 use sol_render::{
     BgVertex, CpuMesh, GpuMesh, MeshInstance, OrbitCamera, OverlayVertex, RenderOutcome, Renderer,
     StarInstance, Vertex,
@@ -195,6 +195,8 @@ struct Graphics {
     renderer: Renderer,
     /// One GPU mesh per ship class (each class has a distinct authored hull).
     meshes: HashMap<ShipClass, GpuMesh>,
+    /// Shared procedural rock, instanced at every resource node.
+    asteroid: GpuMesh,
 }
 
 /// Async-init result slot, shared with the spawned setup future on web.
@@ -251,6 +253,7 @@ impl App {
     fn new() -> Self {
         let mut world = World::new(0x5EA0_5005);
         spawn_demo_fleet(&mut world);
+        spawn_resource_field(&mut world);
         Self {
             window: None,
             graphics: None,
@@ -295,12 +298,17 @@ impl App {
             }
         };
         let meshes = upload_class_meshes(&renderer);
+        let asteroid = renderer.upload_mesh(&build_asteroid_mesh(), "asteroid");
         let (nebula, nebula_idx, stars, grid) = build_environment();
         renderer.set_environment(&nebula, &nebula_idx, &stars, &grid);
 
         self.camera.focus = Vec3::ZERO;
         self.camera.distance = 30.0;
-        self.graphics = Some(Graphics { renderer, meshes });
+        self.graphics = Some(Graphics {
+            renderer,
+            meshes,
+            asteroid,
+        });
         self.window = Some(window);
     }
 
@@ -323,9 +331,14 @@ impl App {
             match Renderer::new(Arc::clone(&window), w, h).await {
                 Ok(mut renderer) => {
                     let meshes = upload_class_meshes(&renderer);
+                    let asteroid = renderer.upload_mesh(&build_asteroid_mesh(), "asteroid");
                     let (nebula, nebula_idx, stars, grid) = build_environment();
                     renderer.set_environment(&nebula, &nebula_idx, &stars, &grid);
-                    *slot.borrow_mut() = Some(Graphics { renderer, meshes });
+                    *slot.borrow_mut() = Some(Graphics {
+                        renderer,
+                        meshes,
+                        asteroid,
+                    });
                     window.request_redraw();
                 }
                 Err(e) => {
@@ -406,6 +419,8 @@ impl App {
         let mut gizmo_lines: Vec<BgVertex> = Vec::new();
         let mut overlay_tris: Vec<OverlayVertex> = Vec::new();
         let mut overlay_lines: Vec<OverlayVertex> = Vec::new();
+        let mut asteroid_instances: Vec<MeshInstance> = Vec::new();
+        let mut carrying_total = 0.0f32;
         for e in &self.world.entities {
             let pos = e.prev_transform.pos.lerp(e.transform.pos, alpha);
             let rot = e.prev_transform.rot.slerp(e.transform.rot, alpha);
@@ -443,7 +458,37 @@ impl App {
                         (vw, vh),
                     );
                 }
+                // Teal haul line: to the node while harvesting, to the depot when
+                // returning a full load.
+                if let Some(g) = e.gather {
+                    let dest = if g.returning {
+                        carrier_pos(&self.world)
+                    } else {
+                        self.world.node(g.node).map(|n| n.pos)
+                    };
+                    if let Some(d) = dest {
+                        push_dashes(&mut gizmo_lines, pos, d, [0.3, 0.85, 0.95], 1.0, 0.8);
+                    }
+                }
             }
+            if let Some(g) = e.gather {
+                carrying_total += g.carrying;
+            }
+        }
+
+        // Resource nodes: one instanced rock each, tinted brown and dimming as it
+        // depletes; per-node rotation gives variety from the one shared mesh.
+        for n in &self.world.resource_nodes {
+            let frac = (n.amount / n.max_amount.max(1.0)).clamp(0.0, 1.0);
+            let rot = Quat::from_euler(
+                EulerRot::XYZ,
+                n.id.0 as f32 * 0.7,
+                n.id.0 as f32 * 1.3,
+                n.id.0 as f32 * 0.4,
+            );
+            let model = Mat4::from_scale_rotation_translation(Vec3::splat(n.radius), rot, n.pos);
+            let b = 0.35 + 0.5 * frac;
+            asteroid_instances.push(MeshInstance::with_tint(model, [b, b * 0.78, b * 0.6, 1.0]));
         }
 
         // Band-select rectangle (desktop LMB drag or mobile box-select hold).
@@ -453,13 +498,20 @@ impl App {
             push_rect_outline_px(&mut overlay_lines, rect, [0.55, 0.85, 1.0, 0.9], (vw, vh));
         }
 
+        // Resource HUD readout (web): banked salvage plus what is in transit.
+        #[cfg(target_arch = "wasm32")]
+        set_resources(self.world.salvage, carrying_total);
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = carrying_total;
+
         let gfx = self.graphics.as_mut().unwrap();
         gfx.renderer
             .set_overlays(&gizmo_lines, &overlay_tris, &overlay_lines);
-        let render_groups: Vec<(&GpuMesh, &[MeshInstance])> = groups
+        let mut render_groups: Vec<(&GpuMesh, &[MeshInstance])> = groups
             .iter()
             .filter_map(|(class, insts)| gfx.meshes.get(class).map(|m| (m, insts.as_slice())))
             .collect();
+        render_groups.push((&gfx.asteroid, asteroid_instances.as_slice()));
         match gfx.renderer.render_groups(&self.camera, &render_groups) {
             RenderOutcome::NeedsReconfigure => {
                 if let Some(window) = &self.window {
@@ -710,6 +762,24 @@ impl App {
         best.map(|(_, id)| id)
     }
 
+    /// Nearest resource node whose bounding sphere the screen ray hits.
+    fn pick_node(&self, sx: f64, sy: f64) -> Option<sol_sim::NodeId> {
+        let (origin, dir) = self.screen_ray(sx, sy)?;
+        let mut best: Option<(f32, sol_sim::NodeId)> = None;
+        for n in &self.world.resource_nodes {
+            let t = (n.pos - origin).dot(dir);
+            if t <= 0.0 {
+                continue;
+            }
+            let closest = origin + dir * t;
+            // A little slack so small far rocks stay tappable.
+            if (closest - n.pos).length() <= n.radius + 1.0 && best.is_none_or(|(bt, _)| t < bt) {
+                best = Some((t, n.id));
+            }
+        }
+        best.map(|(_, id)| id)
+    }
+
     /// Intersect the screen ray with the horizontal plane at `plane_y`.
     fn ground_point(&self, sx: f64, sy: f64, plane_y: f32) -> Option<Vec3> {
         let (origin, dir) = self.screen_ray(sx, sy)?;
@@ -835,10 +905,30 @@ impl App {
         }
     }
 
-    /// Right click / mobile move: order the selection into a formation here.
+    /// Right click / mobile move: order the selection here. Clicking a resource
+    /// node with any resourcer selected sends those resourcers to harvest it;
+    /// otherwise it is a formation move to the clicked point.
     fn on_move_click(&mut self, sx: f64, sy: f64) {
         if self.selected.is_empty() {
             return;
+        }
+        if let Some(node) = self.pick_node(sx, sy) {
+            let resourcers: Vec<EntityId> = self
+                .selected
+                .iter()
+                .copied()
+                .filter(|id| {
+                    self.world
+                        .entity(*id)
+                        .is_some_and(|e| e.ship.class == ShipClass::Resourcer)
+                })
+                .collect();
+            if !resourcers.is_empty() {
+                for id in resourcers {
+                    self.world.enqueue(Command::Gather { entity: id, node });
+                }
+                return;
+            }
         }
         let plane_y = self.selection_centroid_y();
         if let Some(center) = self.ground_point(sx, sy, plane_y) {
@@ -1292,6 +1382,86 @@ fn spawn_demo_fleet(world: &mut World) {
     }
 }
 
+/// Position of the player's mothership (the salvage depot), if any.
+fn carrier_pos(world: &World) -> Option<Vec3> {
+    world
+        .entities
+        .iter()
+        .find(|e| e.ship.class == ShipClass::Carrier && e.ship.team == Team::Player)
+        .map(|e| e.transform.pos)
+}
+
+/// Seed a belt of harvestable salvage sites around the fleet (deterministic;
+/// see `sol_procgen::generate_resource_field`).
+fn spawn_resource_field(world: &mut World) {
+    for site in sol_procgen::generate_resource_field(0x5EA0_5005, 14) {
+        world.spawn_resource_node(Vec3::from(site.pos), site.amount, site.radius);
+    }
+}
+
+/// A small procedural rock (a displaced, flat-shaded icosahedron), instanced at
+/// every resource node. Asteroids may be generated at runtime (see CLAUDE.md);
+/// one shared mesh plus per-node rotation/scale gives cheap variety.
+fn build_asteroid_mesh() -> CpuMesh {
+    let t = (1.0 + 5f32.sqrt()) * 0.5;
+    let base = [
+        Vec3::new(-1.0, t, 0.0),
+        Vec3::new(1.0, t, 0.0),
+        Vec3::new(-1.0, -t, 0.0),
+        Vec3::new(1.0, -t, 0.0),
+        Vec3::new(0.0, -1.0, t),
+        Vec3::new(0.0, 1.0, t),
+        Vec3::new(0.0, -1.0, -t),
+        Vec3::new(0.0, 1.0, -t),
+        Vec3::new(t, 0.0, -1.0),
+        Vec3::new(t, 0.0, 1.0),
+        Vec3::new(-t, 0.0, -1.0),
+        Vec3::new(-t, 0.0, 1.0),
+    ];
+    // Displace each vertex along its normal by a deterministic per-index hash so
+    // the rock is lumpy but its shared vertices still meet (no cracks).
+    let hash = |i: usize| ((i as f32 * 127.1 + 3.7).sin() * 43758.547).fract().abs();
+    let verts: Vec<Vec3> = base
+        .iter()
+        .enumerate()
+        .map(|(i, v)| v.normalize() * (0.82 + 0.34 * hash(i)))
+        .collect();
+    const FACES: [[usize; 3]; 20] = [
+        [0, 11, 5],
+        [0, 5, 1],
+        [0, 1, 7],
+        [0, 7, 10],
+        [0, 10, 11],
+        [1, 5, 9],
+        [5, 11, 4],
+        [11, 10, 2],
+        [10, 7, 6],
+        [7, 1, 8],
+        [3, 9, 4],
+        [3, 4, 2],
+        [3, 2, 6],
+        [3, 6, 8],
+        [3, 8, 9],
+        [4, 9, 5],
+        [2, 4, 11],
+        [6, 2, 10],
+        [8, 6, 7],
+        [9, 8, 1],
+    ];
+    let mut vertices = Vec::with_capacity(FACES.len() * 3);
+    let mut indices = Vec::with_capacity(FACES.len() * 3);
+    for f in FACES {
+        let (a, b, c) = (verts[f[0]], verts[f[1]], verts[f[2]]);
+        let n = (b - a).cross(c - a).normalize_or_zero();
+        let base = vertices.len() as u32;
+        for p in [a, b, c] {
+            vertices.push(Vertex::new(p, n));
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2]);
+    }
+    CpuMesh::new(vertices, indices)
+}
+
 /// Upload a GPU mesh for every ship class (each has a distinct authored hull).
 fn upload_class_meshes(renderer: &Renderer) -> HashMap<ShipClass, GpuMesh> {
     let mut meshes = HashMap::new();
@@ -1529,6 +1699,24 @@ fn show_shift_hint(show: bool) {
             } else {
                 let _ = el.set_attribute("hidden", "");
             }
+        }
+    }
+}
+
+/// Update the resource HUD readout: banked salvage and salvage in transit.
+#[cfg(target_arch = "wasm32")]
+fn set_resources(salvage: f32, in_transit: f32) {
+    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+        if let Some(el) = doc.get_element_by_id("sol-resources") {
+            let text = if in_transit > 0.5 {
+                format!(
+                    "Salvage: {}  (+{} en route)",
+                    salvage as i64, in_transit as i64
+                )
+            } else {
+                format!("Salvage: {}", salvage as i64)
+            };
+            el.set_text_content(Some(&text));
         }
     }
 }

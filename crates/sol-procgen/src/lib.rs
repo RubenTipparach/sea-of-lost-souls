@@ -160,6 +160,35 @@ pub fn generate_background(seed: u64, radius: f32) -> Background {
     }
 }
 
+/// A seeded salvage site: where an asteroid sits, how much it holds, and its
+/// footprint radius. Positions/amounts are gameplay-affecting, so they are
+/// deterministic from the seed (identical across peers); only the visual rock
+/// mesh is elaborated freely by the renderer.
+pub struct ResourceSite {
+    pub pos: [f32; 3],
+    pub amount: f32,
+    pub radius: f32,
+}
+
+/// Generate `count` salvage sites in a rough belt around the origin, seeded from
+/// `seed`. Deterministic: the same seed yields the same field on every peer, so
+/// it is safe to drive gameplay (see `design.md` §7).
+pub fn generate_resource_field(seed: u64, count: usize) -> Vec<ResourceSite> {
+    let mut rng = Rng(seed ^ 0x51E5_F00D_1234_9ABC);
+    (0..count)
+        .map(|_| {
+            let angle = rng.range(0.0, std::f32::consts::TAU);
+            let dist = rng.range(45.0, 95.0);
+            let y = rng.range(-6.0, 6.0);
+            ResourceSite {
+                pos: [dist * angle.cos(), y, dist * angle.sin()],
+                amount: rng.range(300.0, 900.0),
+                radius: rng.range(2.0, 4.0),
+            }
+        })
+        .collect()
+}
+
 fn nebula_color(dir: Vec3, base: Vec3, lobes: &[Lobe]) -> Vec3 {
     let mut c = base;
     // A gentle vertical gradient (a touch lighter "up").
