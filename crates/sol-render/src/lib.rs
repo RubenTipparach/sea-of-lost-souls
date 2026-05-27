@@ -433,13 +433,14 @@ impl Renderer {
         texture.create_view(&wgpu::TextureViewDescriptor::default())
     }
 
-    /// Outcome of a [`Renderer::render`] call. `Lost`/`Outdated` mean the
-    /// caller should reconfigure (e.g. re-`resize`) and try again.
-    pub fn render(
+    /// Draw several mesh groups in one pass: each group is a mesh plus the
+    /// instances drawn with it, so the whole fleet renders with a single clear.
+    /// Groups share one instance buffer via contiguous per-group ranges.
+    /// `Lost`/`Outdated` mean the caller should reconfigure (re-`resize`).
+    pub fn render_groups(
         &mut self,
         camera: &OrbitCamera,
-        mesh: &GpuMesh,
-        instances: &[MeshInstance],
+        groups: &[(&GpuMesh, &[MeshInstance])],
     ) -> RenderOutcome {
         // Update camera uniform.
         let light_dir = Vec3::new(0.4, 0.8, 0.45).normalize();
@@ -447,14 +448,18 @@ impl Renderer {
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
 
-        // Update instance buffer, growing it if needed.
-        let raw: Vec<InstanceRaw> = instances
-            .iter()
-            .map(|i| InstanceRaw {
+        // Flatten every group's instances into one buffer, recording each
+        // group's contiguous [start, end) range.
+        let mut raw: Vec<InstanceRaw> = Vec::new();
+        let mut ranges: Vec<(u32, u32)> = Vec::with_capacity(groups.len());
+        for (_, instances) in groups {
+            let start = raw.len() as u32;
+            raw.extend(instances.iter().map(|i| InstanceRaw {
                 model: i.model.to_cols_array_2d(),
                 tint: i.tint,
-            })
-            .collect();
+            }));
+            ranges.push((start, raw.len() as u32));
+        }
         if raw.len() as u64 > self.instance_capacity {
             self.instance_capacity = (raw.len() as u64).next_power_of_two();
             self.instance_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -516,14 +521,17 @@ impl Renderer {
                 multiview_mask: None,
             });
 
-            if !raw.is_empty() {
-                pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+            for ((mesh, _), &(start, end)) in groups.iter().zip(&ranges) {
+                if start == end {
+                    continue;
+                }
                 pass.set_bind_group(1, &mesh.texture_bind_group, &[]);
                 pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
                 pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..mesh.index_count, 0, 0..raw.len() as u32);
+                pass.draw_indexed(0..mesh.index_count, 0, start..end);
             }
 
             // TODO: egui overlay pass goes here once the HUD lands (design.md §10).
@@ -532,6 +540,16 @@ impl Renderer {
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
         RenderOutcome::Presented
+    }
+
+    /// Convenience: draw a single mesh's instances (one group).
+    pub fn render(
+        &mut self,
+        camera: &OrbitCamera,
+        mesh: &GpuMesh,
+        instances: &[MeshInstance],
+    ) -> RenderOutcome {
+        self.render_groups(camera, &[(mesh, instances)])
     }
 }
 

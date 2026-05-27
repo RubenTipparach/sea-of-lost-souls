@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use glam::{Mat4, Vec3, Vec4};
@@ -132,7 +133,8 @@ impl CameraController {
 /// Graphics resources, created once the window/surface exists.
 struct Graphics {
     renderer: Renderer,
-    mesh: GpuMesh,
+    /// One GPU mesh per ship class (each class has a distinct authored hull).
+    meshes: HashMap<ShipClass, GpuMesh>,
 }
 
 /// Async-init result slot, shared with the spawned setup future on web.
@@ -210,12 +212,11 @@ impl App {
                 return;
             }
         };
-        let cpu_mesh = load_ship_mesh();
-        let mesh = renderer.upload_mesh(&cpu_mesh, "test_interceptor");
+        let meshes = upload_class_meshes(&renderer);
 
         self.camera.focus = Vec3::ZERO;
         self.camera.distance = 30.0;
-        self.graphics = Some(Graphics { renderer, mesh });
+        self.graphics = Some(Graphics { renderer, meshes });
         self.window = Some(window);
     }
 
@@ -237,8 +238,8 @@ impl App {
         wasm_bindgen_futures::spawn_local(async move {
             match Renderer::new(Arc::clone(&window), w, h).await {
                 Ok(renderer) => {
-                    let mesh = renderer.upload_mesh(&load_ship_mesh(), "test_interceptor");
-                    *slot.borrow_mut() = Some(Graphics { renderer, mesh });
+                    let meshes = upload_class_meshes(&renderer);
+                    *slot.borrow_mut() = Some(Graphics { renderer, meshes });
                     window.request_redraw();
                 }
                 Err(e) => {
@@ -300,28 +301,31 @@ impl App {
             0.0
         };
 
-        // Interpolate each entity between its previous and current transform so
-        // the 30 Hz sim renders smoothly at the display's frame rate.
-        let instances: Vec<MeshInstance> = self
-            .world
-            .entities
-            .iter()
-            .map(|e| {
-                let pos = e.prev_transform.pos.lerp(e.transform.pos, alpha);
-                let rot = e.prev_transform.rot.slerp(e.transform.rot, alpha);
-                let scale = Vec3::splat(class_scale(e.ship.class));
-                let model = Mat4::from_scale_rotation_translation(scale, rot, pos);
-                let tint = if self.selected.contains(&e.id) {
-                    [0.45, 1.0, 0.65, 1.0]
-                } else {
-                    [1.0, 1.0, 1.0, 1.0]
-                };
-                MeshInstance::with_tint(model, tint)
-            })
-            .collect();
+        // Interpolate each entity and group instances by class (one draw per
+        // distinct hull mesh) so the smooth 30 Hz render shows each class.
+        let mut groups: HashMap<ShipClass, Vec<MeshInstance>> = HashMap::new();
+        for e in &self.world.entities {
+            let pos = e.prev_transform.pos.lerp(e.transform.pos, alpha);
+            let rot = e.prev_transform.rot.slerp(e.transform.rot, alpha);
+            let scale = Vec3::splat(class_scale(e.ship.class));
+            let model = Mat4::from_scale_rotation_translation(scale, rot, pos);
+            let tint = if self.selected.contains(&e.id) {
+                [0.45, 1.0, 0.65, 1.0]
+            } else {
+                [1.0, 1.0, 1.0, 1.0]
+            };
+            groups
+                .entry(e.ship.class)
+                .or_default()
+                .push(MeshInstance::with_tint(model, tint));
+        }
 
         let gfx = self.graphics.as_mut().unwrap();
-        match gfx.renderer.render(&self.camera, &gfx.mesh, &instances) {
+        let render_groups: Vec<(&GpuMesh, &[MeshInstance])> = groups
+            .iter()
+            .filter_map(|(class, insts)| gfx.meshes.get(class).map(|m| (m, insts.as_slice())))
+            .collect();
+        match gfx.renderer.render_groups(&self.camera, &render_groups) {
             RenderOutcome::NeedsReconfigure => {
                 if let Some(window) = &self.window {
                     let size = window.inner_size();
@@ -681,40 +685,57 @@ fn spawn_demo_fleet(world: &mut World) {
     }
 }
 
-/// Load the test interceptor mesh, preferring the authored GLB and falling back
-/// to a code-generated placeholder so the app always runs.
-fn load_ship_mesh() -> CpuMesh {
-    // On native, try the on-disk GLB. (On web, assets are bundled differently;
-    // for the scaffold we use the placeholder there - see the wasm note.)
+/// Upload a GPU mesh for every ship class (each has a distinct authored hull).
+fn upload_class_meshes(renderer: &Renderer) -> HashMap<ShipClass, GpuMesh> {
+    let mut meshes = HashMap::new();
+    for &class in &ShipClass::ALL {
+        let cpu = load_class_mesh(class);
+        meshes.insert(class, renderer.upload_mesh(&cpu, class.id()));
+    }
+    meshes
+}
+
+/// Load a class's authored hull GLB (on-disk on native, embedded on web),
+/// falling back to a code-generated placeholder so the app always runs.
+fn load_class_mesh(class: ShipClass) -> CpuMesh {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        for path in [
-            "assets/ships/test_interceptor/model.glb",
-            "assets/compiled/test_interceptor.glb",
-        ] {
-            if std::path::Path::new(path).exists() {
-                match CpuMesh::from_gltf_file(path) {
-                    Ok(m) => {
-                        log::info!("loaded ship mesh from {path}");
-                        return m;
-                    }
-                    Err(e) => log::warn!("failed to load {path}: {e:#}; trying next"),
-                }
-            }
+        let path = format!("assets/ships/{}/model.glb", class.id());
+        match CpuMesh::from_gltf_file(&path) {
+            Ok(m) => return m,
+            Err(e) => log::warn!("loading {path} failed: {e:#}; using placeholder"),
         }
-        log::warn!("no GLB found; using placeholder ship mesh");
     }
     #[cfg(target_arch = "wasm32")]
     {
-        // The compiled-asset path is git-ignored, so embed the committed
-        // authored GLB (it carries the baked pixel-art texture + UVs).
-        const GLB: &[u8] = include_bytes!("../../../assets/ships/test_interceptor/model.glb");
-        match CpuMesh::from_gltf_slice(GLB) {
+        match CpuMesh::from_gltf_slice(class_glb_bytes(class)) {
             Ok(m) => return m,
-            Err(e) => log::warn!("embedded GLB load failed: {e:#}; using placeholder"),
+            Err(e) => log::warn!("embedded GLB for {} failed: {e:#}", class.id()),
         }
     }
     placeholder_ship_mesh()
+}
+
+/// The committed per-class GLBs, embedded for the web build (the compiled-asset
+/// path is git-ignored, so we embed the authored model.glb directly).
+#[cfg(target_arch = "wasm32")]
+fn class_glb_bytes(class: ShipClass) -> &'static [u8] {
+    match class {
+        ShipClass::Fighter => include_bytes!("../../../assets/ships/fighter/model.glb"),
+        ShipClass::Bomber => include_bytes!("../../../assets/ships/bomber/model.glb"),
+        ShipClass::Corvette => include_bytes!("../../../assets/ships/corvette/model.glb"),
+        ShipClass::Resourcer => include_bytes!("../../../assets/ships/resourcer/model.glb"),
+        ShipClass::FrigateGeneral => {
+            include_bytes!("../../../assets/ships/frigate_general/model.glb")
+        }
+        ShipClass::FrigateMissile => {
+            include_bytes!("../../../assets/ships/frigate_missile/model.glb")
+        }
+        ShipClass::CapitalDestroyer => {
+            include_bytes!("../../../assets/ships/capital_destroyer/model.glb")
+        }
+        ShipClass::Carrier => include_bytes!("../../../assets/ships/carrier/model.glb"),
+    }
 }
 
 /// A simple code-generated ship silhouette used if the GLB can't be loaded.
