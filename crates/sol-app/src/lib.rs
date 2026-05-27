@@ -9,8 +9,10 @@ use std::sync::Arc;
 
 use glam::{Mat4, Vec3};
 use sol_render::{CpuMesh, GpuMesh, MeshInstance, OrbitCamera, RenderOutcome, Renderer, Vertex};
+use sol_sim::{Command, ShipClass, Team, World};
+use web_time::Instant;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
@@ -29,6 +31,10 @@ struct CameraController {
     last_cursor: Option<(f64, f64)>,
     orbit_speed: f32,
     zoom_speed: f32,
+    /// Active touch points as (id, x, y); drives one-finger orbit + pinch zoom.
+    touches: Vec<(u64, f64, f64)>,
+    /// Distance between the first two touches on the previous pinch sample.
+    last_pinch: Option<f64>,
 }
 
 impl Default for CameraController {
@@ -38,6 +44,8 @@ impl Default for CameraController {
             last_cursor: None,
             orbit_speed: 0.005,
             zoom_speed: 0.1,
+            touches: Vec::new(),
+            last_pinch: None,
         }
     }
 }
@@ -52,17 +60,62 @@ impl CameraController {
         }
     }
 
+    fn orbit_by(&self, camera: &mut OrbitCamera, dx: f32, dy: f32) {
+        camera.yaw -= dx * self.orbit_speed;
+        camera.pitch = (camera.pitch + dy * self.orbit_speed).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+    }
+
     fn on_cursor_moved(&mut self, camera: &mut OrbitCamera, x: f64, y: f64) {
         if self.orbiting {
             if let Some((px, py)) = self.last_cursor {
-                let dx = (x - px) as f32;
-                let dy = (y - py) as f32;
-                camera.yaw -= dx * self.orbit_speed;
-                camera.pitch =
-                    (camera.pitch + dy * self.orbit_speed).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+                self.orbit_by(camera, (x - px) as f32, (y - py) as f32);
             }
         }
         self.last_cursor = Some((x, y));
+    }
+
+    /// Touch input: one finger orbits (like an RMB drag), two fingers pinch to
+    /// zoom. This is the mobile path for the camera; it shares `orbit_by` and
+    /// the same distance clamp as the mouse path.
+    fn on_touch(&mut self, camera: &mut OrbitCamera, phase: TouchPhase, id: u64, x: f64, y: f64) {
+        match phase {
+            TouchPhase::Started => {
+                self.touches.push((id, x, y));
+                self.last_pinch = None;
+            }
+            TouchPhase::Moved => {
+                let prev = self.touches.iter_mut().find(|t| t.0 == id).map(|t| {
+                    let p = (t.1, t.2);
+                    t.1 = x;
+                    t.2 = y;
+                    p
+                });
+                if self.touches.len() == 1 {
+                    if let Some((px, py)) = prev {
+                        self.orbit_by(camera, (x - px) as f32, (y - py) as f32);
+                    }
+                } else if self.touches.len() >= 2 {
+                    let a = self.touches[0];
+                    let b = self.touches[1];
+                    let dist = ((a.1 - b.1).powi(2) + (a.2 - b.2).powi(2)).sqrt();
+                    if let Some(last) = self.last_pinch {
+                        // Pinching apart (dist grows) dollies in.
+                        if last > 1.0 {
+                            let ratio = (dist / last) as f32;
+                            if ratio > 0.0 {
+                                camera.distance =
+                                    (camera.distance / ratio).clamp(MIN_DISTANCE, MAX_DISTANCE);
+                            }
+                        }
+                    }
+                    self.last_pinch = Some(dist);
+                }
+            }
+            TouchPhase::Ended | TouchPhase::Cancelled => {
+                self.touches.retain(|t| t.0 != id);
+                self.last_pinch = None;
+            }
+        }
     }
 
     fn on_scroll(&mut self, camera: &mut OrbitCamera, delta: MouseScrollDelta) {
@@ -88,15 +141,38 @@ type PendingGraphics = std::rc::Rc<std::cell::RefCell<Option<Graphics>>>;
 
 /// Application state. Built lazily on `resumed` (the winit 0.30 lifecycle point
 /// where a window/surface can be created on all platforms incl. web).
-#[derive(Default)]
 struct App {
     window: Option<Arc<Window>>,
     graphics: Option<Graphics>,
     camera: OrbitCamera,
     controller: CameraController,
+    /// Deterministic simulation; stepped at a fixed rate, rendered interpolated.
+    world: World,
+    /// Wall-clock of the previous frame. App-side only; the sim never sees it.
+    last_frame: Option<Instant>,
+    /// Real time accumulated but not yet consumed by a fixed step.
+    accumulator: f32,
     /// On web, adapter/device acquisition is async; the result lands here.
     #[cfg(target_arch = "wasm32")]
     pending: Option<PendingGraphics>,
+}
+
+impl App {
+    fn new() -> Self {
+        let mut world = World::new(0x5EA0_5005);
+        spawn_demo_fleet(&mut world);
+        Self {
+            window: None,
+            graphics: None,
+            camera: OrbitCamera::default(),
+            controller: CameraController::default(),
+            world,
+            last_frame: None,
+            accumulator: 0.0,
+            #[cfg(target_arch = "wasm32")]
+            pending: None,
+        }
+    }
 }
 
 impl App {
@@ -118,7 +194,7 @@ impl App {
         let mesh = renderer.upload_mesh(&cpu_mesh, "test_interceptor");
 
         self.camera.focus = Vec3::ZERO;
-        self.camera.distance = 8.0;
+        self.camera.distance = 30.0;
         self.graphics = Some(Graphics { renderer, mesh });
         self.window = Some(window);
     }
@@ -128,7 +204,7 @@ impl App {
     #[cfg(target_arch = "wasm32")]
     fn init_graphics(&mut self, window: Arc<Window>) {
         self.camera.focus = Vec3::ZERO;
-        self.camera.distance = 8.0;
+        self.camera.distance = 30.0;
         self.window = Some(Arc::clone(&window));
 
         let slot: PendingGraphics = std::rc::Rc::new(std::cell::RefCell::new(None));
@@ -170,14 +246,50 @@ impl App {
         #[cfg(target_arch = "wasm32")]
         self.take_pending();
 
-        let Some(gfx) = self.graphics.as_mut() else {
+        if self.graphics.is_none() {
             // Graphics not ready yet (web async init); keep polling.
             if let Some(window) = &self.window {
                 window.request_redraw();
             }
             return;
+        }
+
+        // Advance the fixed-step sim by however much real time has elapsed,
+        // clamped so a backgrounded tab does not trigger a step spiral. The
+        // accumulator and clock live here, never in the deterministic sim.
+        let now = Instant::now();
+        let frame_dt = match self.last_frame.replace(now) {
+            Some(prev) => (now - prev).as_secs_f32().min(0.25),
+            None => 0.0,
         };
-        let instances = [MeshInstance::new(Mat4::IDENTITY)];
+        self.accumulator += frame_dt;
+        let dt = sol_sim::TICK_DT;
+        let mut steps = 0;
+        while self.accumulator >= dt && steps < 8 {
+            self.world.step(dt);
+            self.accumulator -= dt;
+            steps += 1;
+        }
+        let alpha = if dt > 0.0 {
+            (self.accumulator / dt).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
+        // Interpolate each entity between its previous and current transform so
+        // the 30 Hz sim renders smoothly at the display's frame rate.
+        let instances: Vec<MeshInstance> = self
+            .world
+            .entities
+            .iter()
+            .map(|e| {
+                let pos = e.prev_transform.pos.lerp(e.transform.pos, alpha);
+                let rot = e.prev_transform.rot.slerp(e.transform.rot, alpha);
+                MeshInstance::new(Mat4::from_rotation_translation(rot, pos))
+            })
+            .collect();
+
+        let gfx = self.graphics.as_mut().unwrap();
         match gfx.renderer.render(&self.camera, &gfx.mesh, &instances) {
             RenderOutcome::NeedsReconfigure => {
                 if let Some(window) = &self.window {
@@ -187,7 +299,7 @@ impl App {
             }
             RenderOutcome::Presented | RenderOutcome::Skipped => {}
         }
-        // Keep animating (orbit is interactive; request continuous frames).
+        // Keep animating (the sim advances continuously).
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -230,6 +342,10 @@ impl ApplicationHandler for App {
             WindowEvent::MouseWheel { delta, .. } => {
                 self.controller.on_scroll(&mut self.camera, delta);
             }
+            WindowEvent::Touch(t) => {
+                self.controller
+                    .on_touch(&mut self.camera, t.phase, t.id, t.location.x, t.location.y);
+            }
             WindowEvent::RedrawRequested => self.redraw(),
             _ => {}
         }
@@ -242,8 +358,33 @@ pub fn run() {
     let event_loop = EventLoop::new().expect("create event loop");
     // Continuous redraw so the orbit camera feels responsive.
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App::default();
+    let mut app = App::new();
     event_loop.run_app(&mut app).expect("run event loop");
+}
+
+/// Spawn a small starting fleet so the fixed-step sim and interpolation have
+/// something to drive. All ships share the placeholder mesh for now (per-class
+/// meshes land in Stage 3/4); only their positions and classes differ.
+fn spawn_demo_fleet(world: &mut World) {
+    world.spawn_class(ShipClass::Carrier, Team::Player, Vec3::ZERO);
+    let formation = [
+        (ShipClass::FrigateGeneral, Vec3::new(-9.0, 0.0, 7.0)),
+        (ShipClass::Corvette, Vec3::new(9.0, 0.0, 7.0)),
+        (ShipClass::Resourcer, Vec3::new(0.0, 0.0, 11.0)),
+        (ShipClass::Fighter, Vec3::new(-4.0, 2.5, -7.0)),
+        (ShipClass::Fighter, Vec3::new(4.0, 2.5, -7.0)),
+        (ShipClass::Bomber, Vec3::new(0.0, -2.5, -9.0)),
+    ];
+    for (class, pos) in formation {
+        world.spawn_class(class, Team::Player, pos);
+    }
+    // A neutral scout drifting slowly, so the fixed step + interpolation are
+    // visibly doing something before move orders (Stage 7) exist.
+    let scout = world.spawn_class(ShipClass::Fighter, Team::Neutral, Vec3::new(-16.0, 0.0, -2.0));
+    world.enqueue(Command::SetVelocity {
+        entity: scout,
+        linear: Vec3::new(1.2, 0.0, 0.0),
+    });
 }
 
 /// Load the test interceptor mesh, preferring the authored GLB and falling back

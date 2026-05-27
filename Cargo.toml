@@ -51,6 +51,9 @@ egui-winit = { version = "0.34", default-features = false }
 pollster = "0.4"
 raw-window-handle = "0.6"
 
+# Cross-platform monotonic clock: std::time on native, performance.now on wasm.
+web-time = "1"
+
 log = "0.4"
 env_logger = "0.11"
 

@@ -19,6 +19,7 @@ sol-sim = { path = "../sol-sim" }
 sol-assets = { path = "../sol-assets" }
 glam.workspace = true
 winit.workspace = true
+web-time.workspace = true
 log.workspace = true
 anyhow.workspace = true
 

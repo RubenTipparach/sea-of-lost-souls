@@ -18,10 +18,10 @@ pub use rng::Rng;
 
 /// Fixed simulation rate. The sim advances in steps of [`TICK_DT`] seconds; the
 /// renderer interpolates between the previous and current state, so visual
-/// smoothness is independent of this rate. 30 Hz is the RTS default: cheap on
-/// single-threaded wasm and light on the (future) lockstep command stream.
-/// Raising it to 60 is a one-line change here.
-pub const TICK_HZ: u32 = 30;
+/// smoothness is independent of this rate. 60 Hz gives crisp input-to-sim
+/// latency; drop it to 30 (one line) if single-threaded wasm CPU or future
+/// lockstep command bandwidth becomes the constraint.
+pub const TICK_HZ: u32 = 60;
 /// Seconds per fixed step (`1 / TICK_HZ`).
 pub const TICK_DT: f32 = 1.0 / TICK_HZ as f32;
 
