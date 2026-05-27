@@ -269,6 +269,9 @@ pub struct Renderer {
     /// move line); drawn on top of the scene so selection stays visible.
     line_pipeline: wgpu::RenderPipeline,
     gizmo_lines: DynamicBuffer,
+    /// Additive world-space sprites for transient effects (harvest motes),
+    /// drawn with the star pipeline from a per-frame buffer.
+    particles: DynamicBuffer,
     /// Screen-space HUD overlays (band-select box + health bars), clip-space.
     overlay_tri_pipeline: wgpu::RenderPipeline,
     overlay_line_pipeline: wgpu::RenderPipeline,
@@ -593,6 +596,7 @@ impl Renderer {
         );
 
         let gizmo_lines = DynamicBuffer::new(&device, "gizmo lines", 4096);
+        let particles = DynamicBuffer::new(&device, "particles", 4096);
         let overlay_tris = DynamicBuffer::new(&device, "overlay tris", 4096);
         let overlay_lines = DynamicBuffer::new(&device, "overlay lines", 1024);
 
@@ -621,6 +625,7 @@ impl Renderer {
             environment: None,
             line_pipeline,
             gizmo_lines,
+            particles,
             overlay_tri_pipeline,
             overlay_line_pipeline,
             overlay_tris,
@@ -802,6 +807,13 @@ impl Renderer {
             .upload(&self.device, &self.queue, "overlay lines", overlay_lines);
     }
 
+    /// Upload per-frame additive world-space particle sprites (harvest motes),
+    /// drawn with the star pipeline. Pass empty to clear.
+    pub fn set_particles(&mut self, particles: &[StarInstance]) {
+        self.particles
+            .upload(&self.device, &self.queue, "particles", particles);
+    }
+
     /// Draw several mesh groups in one pass: each group is a mesh plus the
     /// instances drawn with it, so the whole fleet renders with a single clear.
     /// Groups share one instance buffer via contiguous per-group ranges.
@@ -922,6 +934,14 @@ impl Renderer {
                 pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                 pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.index_count, 0, start..end);
+            }
+
+            // Additive harvest-mote sprites (reuse the star billboard pipeline).
+            if self.particles.count > 0 {
+                pass.set_pipeline(&self.star_pipeline);
+                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                pass.set_vertex_buffer(0, self.particles.buffer.slice(..));
+                pass.draw(0..6, 0..self.particles.count);
             }
 
             // World-space selection gizmos on top of the ships (camera-transformed

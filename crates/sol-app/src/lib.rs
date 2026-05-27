@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use glam::{EulerRot, Mat4, Quat, Vec3, Vec4};
 use sol_render::{
-    BgVertex, CpuMesh, GpuMesh, MeshInstance, OrbitCamera, OverlayVertex, RenderOutcome, Renderer,
-    StarInstance, Vertex,
+    BgVertex, CpuMesh, CpuTexture, GpuMesh, MeshInstance, OrbitCamera, OverlayVertex,
+    RenderOutcome, Renderer, StarInstance, Vertex,
 };
 use sol_sim::{Command, EntityId, Patrol, ShipClass, Team, World};
 
@@ -216,6 +216,9 @@ struct App {
     last_frame: Option<Instant>,
     /// Real time accumulated but not yet consumed by a fixed step.
     accumulator: f32,
+    /// Wall-clock seconds since start, for purely visual animation (particles).
+    /// Render-only; never read by the sim.
+    elapsed: f32,
     /// Locally-selected ships (UI state only; never enters the sim).
     selected: Vec<EntityId>,
     /// Active group-move arrangement (cycled with `F` / the HUD button).
@@ -262,6 +265,7 @@ impl App {
             world,
             last_frame: None,
             accumulator: 0.0,
+            elapsed: 0.0,
             selected: Vec::new(),
             formation: Formation::Parade,
             select_box: None,
@@ -387,6 +391,7 @@ impl App {
             None => 0.0,
         };
         self.accumulator += frame_dt;
+        self.elapsed += frame_dt;
         // Camera panning/elevation is app-side and uses real frame time.
         self.apply_camera_pan(frame_dt);
         let dt = sol_sim::TICK_DT;
@@ -420,6 +425,7 @@ impl App {
         let mut overlay_tris: Vec<OverlayVertex> = Vec::new();
         let mut overlay_lines: Vec<OverlayVertex> = Vec::new();
         let mut asteroid_instances: Vec<MeshInstance> = Vec::new();
+        let mut particles: Vec<StarInstance> = Vec::new();
         let mut carrying_total = 0.0f32;
         for e in &self.world.entities {
             let pos = e.prev_transform.pos.lerp(e.transform.pos, alpha);
@@ -437,26 +443,15 @@ impl App {
                 .or_default()
                 .push(MeshInstance::with_tint(model, tint));
 
+            let r = self.world.registry.get(e.ship.class).radius;
+
             if selected {
-                let r = self.world.registry.get(e.ship.class).radius;
                 let ground = Vec3::new(pos.x, 0.0, pos.z);
                 push_circle(&mut gizmo_lines, ground, r * 1.4 + 0.6, [0.3, 1.0, 0.6], 28);
                 push_line(&mut gizmo_lines, ground, pos, [0.2, 0.6, 0.4]);
                 if let Some(target) = e.order {
                     push_dashes(&mut gizmo_lines, pos, target, [1.0, 0.75, 0.25], 1.2, 0.9);
                     push_circle(&mut gizmo_lines, target, 0.8, [1.0, 0.75, 0.25], 16);
-                }
-                let max_hull = self.world.registry.get(e.ship.class).max_hull;
-                let frac = (e.hull / max_hull.max(1.0)).clamp(0.0, 1.0);
-                if let Some((sx, sy)) = self.project_to_screen(pos + Vec3::Y * (r * 0.8 + 1.2)) {
-                    push_health_bar(
-                        &mut overlay_tris,
-                        &mut overlay_lines,
-                        sx,
-                        sy,
-                        frac,
-                        (vw, vh),
-                    );
                 }
                 // Teal haul line: to the node while harvesting, to the depot when
                 // returning a full load.
@@ -471,8 +466,71 @@ impl App {
                     }
                 }
             }
+
+            // HUD bars above the ship: health (when selected) then a gold cargo /
+            // harvest bar (whenever a resourcer has an active gather task).
+            if selected || e.gather.is_some() {
+                if let Some((sx, sy)) = self.project_to_screen(pos + Vec3::Y * (r * 0.8 + 1.2)) {
+                    let mut row = sy;
+                    if selected {
+                        let max_hull = self.world.registry.get(e.ship.class).max_hull;
+                        let hf = (e.hull / max_hull.max(1.0)).clamp(0.0, 1.0);
+                        let hc = [1.0 - hf, 0.25 + 0.7 * hf, 0.18, 0.95];
+                        push_bar(
+                            &mut overlay_tris,
+                            &mut overlay_lines,
+                            sx,
+                            row,
+                            hf,
+                            hc,
+                            (vw, vh),
+                        );
+                        row += 9.0;
+                    }
+                    if let Some(g) = e.gather {
+                        let cap = self.world.registry.get(e.ship.class).cargo.max(1.0);
+                        let cf = (g.carrying / cap).clamp(0.0, 1.0);
+                        let cc = [1.0, 0.78, 0.3, 0.95];
+                        push_bar(
+                            &mut overlay_tris,
+                            &mut overlay_lines,
+                            sx,
+                            row,
+                            cf,
+                            cc,
+                            (vw, vh),
+                        );
+                    }
+                }
+            }
+
+            // Harvest motes: gold sprites streaming from the node into a resourcer
+            // while it sits in range mining (purely visual).
             if let Some(g) = e.gather {
                 carrying_total += g.carrying;
+                if !g.returning {
+                    if let Some(n) = self.world.node(g.node) {
+                        if (pos - n.pos).length() <= n.radius + r + 3.0 {
+                            let surface = n.pos + (pos - n.pos).normalize_or_zero() * n.radius;
+                            for k in 0..8u32 {
+                                let kk = k as f32;
+                                let phase = (self.elapsed * 0.8 + kk * 0.127).fract();
+                                let jit = Vec3::new(
+                                    (self.elapsed * 3.1 + kk).sin(),
+                                    (self.elapsed * 2.7 + kk * 1.7).cos(),
+                                    (self.elapsed * 2.3 + kk * 0.9).sin(),
+                                ) * (0.6 * (1.0 - phase));
+                                let p = surface.lerp(pos, phase) + jit;
+                                let inten = 0.7 * (1.0 - phase) + 0.15;
+                                particles.push(StarInstance::new(
+                                    p.to_array(),
+                                    [inten, inten * 0.78, inten * 0.32],
+                                    0.18 * (1.0 - phase) + 0.05,
+                                ));
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -487,8 +545,9 @@ impl App {
                 n.id.0 as f32 * 0.4,
             );
             let model = Mat4::from_scale_rotation_translation(Vec3::splat(n.radius), rot, n.pos);
-            let b = 0.35 + 0.5 * frac;
-            asteroid_instances.push(MeshInstance::with_tint(model, [b, b * 0.78, b * 0.6, 1.0]));
+            // Texture supplies the rock color; tint only dims as the node empties.
+            let v = 0.55 + 0.45 * frac;
+            asteroid_instances.push(MeshInstance::with_tint(model, [v, v, v, 1.0]));
         }
 
         // Band-select rectangle (desktop LMB drag or mobile box-select hold).
@@ -507,6 +566,7 @@ impl App {
         let gfx = self.graphics.as_mut().unwrap();
         gfx.renderer
             .set_overlays(&gizmo_lines, &overlay_tris, &overlay_lines);
+        gfx.renderer.set_particles(&particles);
         let mut render_groups: Vec<(&GpuMesh, &[MeshInstance])> = groups
             .iter()
             .filter_map(|(class, insts)| gfx.meshes.get(class).map(|m| (m, insts.as_slice())))
@@ -700,14 +760,16 @@ fn push_rect_outline_px(
     }
 }
 
-/// A health bar centered at screen point `(sx, sy)`: a dark backing, a fill of
-/// width proportional to `frac` (green full -> red empty), and a faint outline.
-fn push_health_bar(
+/// A small HUD bar centered at screen point `(sx, sy)`: a dark backing, a fill
+/// of width proportional to `frac` drawn in `fill_color`, and a faint outline.
+/// Used for both the health bar (green -> red) and the cargo bar (gold).
+fn push_bar(
     tris: &mut Vec<OverlayVertex>,
     lines: &mut Vec<OverlayVertex>,
     sx: f64,
     sy: f64,
     frac: f32,
+    fill_color: [f32; 4],
     view: (f32, f32),
 ) {
     const HALF_W: f64 = 22.0;
@@ -715,7 +777,6 @@ fn push_health_bar(
     let (x0, y0, x1, y1) = (sx - HALF_W, sy - HALF_H, sx + HALF_W, sy + HALF_H);
     push_rect_px(tris, [x0, y0, x1, y1], [0.0, 0.0, 0.0, 0.55], view);
     let fill_x1 = x0 + 1.0 + (x1 - x0 - 2.0) * frac as f64;
-    let fill_color = [1.0 - frac, 0.25 + 0.7 * frac, 0.18, 0.95];
     push_rect_px(
         tris,
         [x0 + 1.0, y0 + 1.0, fill_x1, y1 - 1.0],
@@ -1455,11 +1516,83 @@ fn build_asteroid_mesh() -> CpuMesh {
         let n = (b - a).cross(c - a).normalize_or_zero();
         let base = vertices.len() as u32;
         for p in [a, b, c] {
-            vertices.push(Vertex::new(p, n));
+            // Triplanar UV by the face's dominant axis (no stretch on facets).
+            let an = n.abs();
+            let uv = if an.x >= an.y && an.x >= an.z {
+                [p.z, p.y]
+            } else if an.y >= an.z {
+                [p.x, p.z]
+            } else {
+                [p.x, p.y]
+            };
+            vertices.push(Vertex {
+                position: p.to_array(),
+                normal: n.to_array(),
+                uv: [uv[0] * 0.5 + 0.5, uv[1] * 0.5 + 0.5],
+            });
         }
         indices.extend_from_slice(&[base, base + 1, base + 2]);
     }
-    CpuMesh::new(vertices, indices)
+    let mut mesh = CpuMesh::new(vertices, indices);
+    mesh.texture = Some(build_asteroid_texture());
+    mesh
+}
+
+/// A procedural rock albedo (browns/greys with sparse darker craters). Alpha is
+/// 0 everywhere so the mesh shader treats it as non-emissive (the alpha channel
+/// is the emissive mask for baked ship windows); without this asteroids would
+/// render fully bright.
+fn build_asteroid_texture() -> CpuTexture {
+    const S: u32 = 96;
+    let hash = |x: i32, y: i32| -> f32 {
+        let mut h = (x
+            .wrapping_mul(374_761_393)
+            .wrapping_add(y.wrapping_mul(668_265_263))) as u32;
+        h = (h ^ (h >> 13)).wrapping_mul(1_274_126_177);
+        ((h ^ (h >> 16)) & 0xffff) as f32 / 65535.0
+    };
+    let smooth = |t: f32| t * t * (3.0 - 2.0 * t);
+    let vnoise = |fx: f32, fy: f32| -> f32 {
+        let (ix, iy) = (fx.floor() as i32, fy.floor() as i32);
+        let (tx, ty) = (smooth(fx - ix as f32), smooth(fy - iy as f32));
+        let a = hash(ix, iy);
+        let b = hash(ix + 1, iy);
+        let c = hash(ix, iy + 1);
+        let d = hash(ix + 1, iy + 1);
+        let ab = a + (b - a) * tx;
+        let cd = c + (d - c) * tx;
+        ab + (cd - ab) * ty
+    };
+    let fbm = |x: f32, y: f32| -> f32 {
+        let (mut f, mut amp, mut freq, mut norm) = (0.0, 0.5, 1.0, 0.0);
+        for _ in 0..4 {
+            f += amp * vnoise(x * freq, y * freq);
+            norm += amp;
+            amp *= 0.5;
+            freq *= 2.0;
+        }
+        f / norm
+    };
+    let lo = [70.0f32, 58.0, 48.0];
+    let hi = [170.0f32, 154.0, 138.0];
+    let mut rgba = Vec::with_capacity((S * S * 4) as usize);
+    for y in 0..S {
+        for x in 0..S {
+            let (u, v) = (x as f32 * 0.09, y as f32 * 0.09);
+            let mut t = fbm(u, v);
+            // Sparse darker crater pits.
+            if vnoise(u * 2.6 + 11.0, v * 2.6 + 7.0) > 0.78 {
+                t *= 0.4;
+            }
+            let c = |i: usize| (lo[i] + (hi[i] - lo[i]) * t).clamp(0.0, 255.0) as u8;
+            rgba.extend_from_slice(&[c(0), c(1), c(2), 0]);
+        }
+    }
+    CpuTexture {
+        width: S,
+        height: S,
+        rgba,
+    }
 }
 
 /// Upload a GPU mesh for every ship class (each has a distinct authored hull).
