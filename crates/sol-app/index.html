@@ -30,23 +30,47 @@
         font-family: system-ui, sans-serif;
         pointer-events: none;
       }
-      /* Touch-only prompt to enter landscape + fullscreen (portrait only). */
-      #go-landscape {
+      /* Mobile-only gate. This game is landscape-only on phones/tablets, so we
+         cover the whole screen until the device is in landscape. A centered
+         overlay (not a corner button) can't be hidden behind the browser's
+         toolbars. */
+      #orient-gate {
         position: fixed;
-        left: 50%;
-        bottom: 24px;
-        transform: translateX(-50%);
-        z-index: 10;
-        padding: 14px 22px;
-        border: 1px solid #2b6cb0;
-        border-radius: 10px;
-        background: #0b1a2b;
+        inset: 0;
+        z-index: 1000;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        padding: 24px;
+        background: radial-gradient(circle at 50% 38%, #0b1622, #04050a 70%);
         color: #cfe0f5;
-        font: 600 16px/1.2 system-ui, sans-serif;
-        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+        font-family: system-ui, sans-serif;
       }
-      #go-landscape[hidden] {
+      #orient-gate[hidden] {
         display: none;
+      }
+      #orient-gate .gate-title {
+        font-size: 22px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        margin-bottom: 8px;
+      }
+      #orient-gate .gate-msg {
+        font-size: 15px;
+        color: #8aa0bd;
+        margin-bottom: 24px;
+        max-width: 24em;
+      }
+      #go-landscape {
+        appearance: none;
+        border: 1px solid #2b6cb0;
+        border-radius: 12px;
+        background: #12304d;
+        color: #eaf2ff;
+        font: 600 17px/1.2 system-ui, sans-serif;
+        padding: 16px 28px;
       }
     </style>
     <script>
@@ -77,26 +101,36 @@
   </head>
   <body>
     <div id="loading">Initializing fleet intelligence&hellip;</div>
-    <button id="go-landscape" type="button" hidden>Rotate to landscape</button>
+    <div id="orient-gate" hidden>
+      <div class="gate-title">Sea of Lost Souls</div>
+      <div class="gate-msg">
+        Landscape only. Rotate your device, or tap to enter fullscreen landscape.
+      </div>
+      <button id="go-landscape" type="button">Tap to play</button>
+    </div>
     <script>
-      // On touch devices we only support landscape. While the device is in
-      // portrait, show a button that (on tap, the required user gesture) enters
-      // fullscreen and locks the orientation to landscape.
+      // Landscape-only on phones/tablets: show a full-screen gate until the
+      // device is in landscape. The button enters fullscreen and locks landscape
+      // (the user gesture both APIs require); manually rotating also dismisses
+      // the gate, so browsers that reject the lock (e.g. iOS) still work.
       (function () {
+        var gate = document.getElementById("orient-gate");
         var btn = document.getElementById("go-landscape");
-        if (!btn) return;
-        if (!window.__solIsMobile()) return;
-
-        function portrait() {
-          return (
-            !!window.matchMedia &&
-            window.matchMedia("(orientation: portrait)").matches
-          );
+        if (!gate || !btn) return;
+        if (!window.__solIsMobile()) {
+          gate.remove();
+          return;
+        }
+        function landscape() {
+          if (window.matchMedia) {
+            return window.matchMedia("(orientation: landscape)").matches;
+          }
+          return window.innerWidth >= window.innerHeight;
         }
         function refresh() {
-          btn.hidden = !portrait();
+          gate.hidden = landscape();
         }
-        function goLandscape() {
+        function go() {
           var el = document.documentElement;
           var fs =
             el.requestFullscreen ||
@@ -109,23 +143,13 @@
             if (screen.orientation && screen.orientation.lock) {
               screen.orientation.lock("landscape").catch(function () {});
             }
-            refresh();
+            setTimeout(refresh, 50);
           });
         }
-        btn.addEventListener("click", goLandscape);
+        btn.addEventListener("click", go);
         window.addEventListener("orientationchange", refresh);
+        window.addEventListener("resize", refresh);
         document.addEventListener("fullscreenchange", refresh);
-        if (window.matchMedia) {
-          var mq = window.matchMedia("(orientation: portrait)");
-          try {
-            mq.addEventListener("change", refresh);
-          } catch (e) {
-            // Older Safari uses the deprecated addListener.
-            try {
-              mq.addListener(refresh);
-            } catch (e2) {}
-          }
-        }
         refresh();
       })();
     </script>
