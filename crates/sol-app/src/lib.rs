@@ -248,6 +248,9 @@ struct App {
     /// frame (orbit/zoom still work). Cleared the moment the player pans. UI
     /// state only; never enters the sim.
     focus_target: Option<EntityId>,
+    /// Sensors-manager view: dims the scene and draws the tactical grid + sensor
+    /// spheres. Local UI only.
+    sensors_open: bool,
     /// Single-player pause: when set, the fixed-step sim is not advanced (the
     /// camera and UI still work). App-side only; a lockstep-synced pause is a
     /// future multiplayer concern.
@@ -304,6 +307,7 @@ impl App {
             preview_dragging: false,
             preview_idle: PREVIEW_RETURN_DELAY,
             focus_target: None,
+            sensors_open: false,
             paused: false,
             select_box: None,
             box_select_armed: false,
@@ -502,6 +506,8 @@ impl App {
             let gfx = self.graphics.as_mut().unwrap();
             gfx.renderer.set_overlays(&[], &[], &[]);
             gfx.renderer.set_particles(&[]);
+            // Clear any sensors-mode dim so it can't darken the build preview.
+            gfx.renderer.set_scene_dim([0.0, 0.0, 0.0, 0.0]);
             let groups: Vec<(&GpuMesh, &[MeshInstance])> = gfx
                 .meshes
                 .get(&class)
@@ -551,7 +557,38 @@ impl App {
         let mut asteroid_instances: Vec<MeshInstance> = Vec::new();
         let mut particles: Vec<StarInstance> = Vec::new();
         let mut carrying_total = 0.0f32;
+        // Fog of war: an enemy is visible only inside some player ship's sensor
+        // sphere. Local UI only (the sim's own AI detection lives in `World::step`).
+        let detected: std::collections::HashSet<EntityId> = {
+            let players: Vec<(Vec3, f32)> = self
+                .world
+                .entities
+                .iter()
+                .filter(|e| e.ship.team == Team::Player)
+                .map(|e| {
+                    (
+                        e.transform.pos,
+                        self.world.registry.get(e.ship.class).sensor_range,
+                    )
+                })
+                .collect();
+            self.world
+                .entities
+                .iter()
+                .filter(|e| e.ship.team == Team::Enemy)
+                .filter(|e| {
+                    players
+                        .iter()
+                        .any(|&(pp, sr)| (e.transform.pos - pp).length_squared() <= sr * sr)
+                })
+                .map(|e| e.id)
+                .collect()
+        };
         for e in &self.world.entities {
+            // Fog of war: skip enemies that no player sensor currently sees.
+            if e.ship.team == Team::Enemy && !detected.contains(&e.id) {
+                continue;
+            }
             let pos = e.prev_transform.pos.lerp(e.transform.pos, alpha);
             let rot = e.prev_transform.rot.slerp(e.transform.rot, alpha);
             let scale = Vec3::splat(class_scale(e.ship.class));
@@ -703,6 +740,31 @@ impl App {
             push_rect_outline_px(&mut overlay_lines, rect, [0.55, 0.85, 1.0, 0.9], (vw, vh));
         }
 
+        // Sensors-manager overlay: a tactical grid plus a sensor sphere around
+        // each player ship, with detected enemies flagged by a ground blip. The
+        // scene is dimmed (at submit, below) so these read clearly. Local UI only.
+        let sensors = self.sensors_open;
+        if sensors {
+            push_sensor_grid(
+                &mut gizmo_lines,
+                self.camera.focus,
+                160.0,
+                12.0,
+                [0.13, 0.34, 0.52],
+            );
+            for e in &self.world.entities {
+                let pos = e.prev_transform.pos.lerp(e.transform.pos, alpha);
+                if e.ship.team == Team::Player {
+                    let sr = self.world.registry.get(e.ship.class).sensor_range;
+                    push_sensor_sphere(&mut gizmo_lines, pos, sr, [0.2, 0.6, 0.95]);
+                } else if e.ship.team == Team::Enemy && detected.contains(&e.id) {
+                    let ground = Vec3::new(pos.x, 0.0, pos.z);
+                    push_circle(&mut gizmo_lines, ground, 2.0, [1.0, 0.3, 0.3], 18);
+                    push_line(&mut gizmo_lines, ground, pos, [0.8, 0.25, 0.25]);
+                }
+            }
+        }
+
         // Resource + crew + build HUD readouts (web).
         #[cfg(target_arch = "wasm32")]
         {
@@ -730,6 +792,12 @@ impl App {
         gfx.renderer
             .set_overlays(&gizmo_lines, &overlay_tris, &overlay_lines);
         gfx.renderer.set_particles(&particles);
+        // Dim the 3D scene in sensors mode (the gizmo grid/spheres stay bright).
+        gfx.renderer.set_scene_dim(if sensors {
+            [0.0, 0.01, 0.05, 0.62]
+        } else {
+            [0.0, 0.0, 0.0, 0.0]
+        });
         let mut render_groups: Vec<(&GpuMesh, &[MeshInstance])> = groups
             .iter()
             .filter_map(|(class, insts)| gfx.meshes.get(class).map(|m| (m, insts.as_slice())))
@@ -902,6 +970,62 @@ fn push_circle(v: &mut Vec<BgVertex>, center: Vec3, radius: f32, color: [f32; 3]
         let p = center + Vec3::new(radius * a.cos(), 0.0, radius * a.sin());
         push_line(v, prev, p, color);
         prev = p;
+    }
+}
+
+/// World-space ring of radius `radius` in the plane spanned by basis vectors
+/// `a` and `b` (unit length), as `segments` line segments.
+fn push_ring(
+    v: &mut Vec<BgVertex>,
+    center: Vec3,
+    radius: f32,
+    a: Vec3,
+    b: Vec3,
+    color: [f32; 3],
+    segments: usize,
+) {
+    let mut prev = center + a * radius;
+    for k in 1..=segments {
+        let t = k as f32 / segments as f32 * std::f32::consts::TAU;
+        let p = center + (a * t.cos() + b * t.sin()) * radius;
+        push_line(v, prev, p, color);
+        prev = p;
+    }
+}
+
+/// Wireframe "sensor sphere": three great circles plus two latitude rings, which
+/// is enough to read as a shaded sphere for the sensors-manager range display.
+fn push_sensor_sphere(v: &mut Vec<BgVertex>, center: Vec3, radius: f32, color: [f32; 3]) {
+    const SEG: usize = 28;
+    push_ring(v, center, radius, Vec3::X, Vec3::Z, color, SEG); // equator
+    push_ring(v, center, radius, Vec3::X, Vec3::Y, color, SEG);
+    push_ring(v, center, radius, Vec3::Y, Vec3::Z, color, SEG);
+    let rr = radius * 0.866; // cos(30 deg)
+    let yo = radius * 0.5;
+    push_ring(v, center + Vec3::Y * yo, rr, Vec3::X, Vec3::Z, color, SEG);
+    push_ring(v, center - Vec3::Y * yo, rr, Vec3::X, Vec3::Z, color, SEG);
+}
+
+/// Tactical reference grid on the y=0 plane, snapped to and centered on `center`
+/// so it follows the view. `half` is the extent each way, `spacing` the pitch.
+fn push_sensor_grid(v: &mut Vec<BgVertex>, center: Vec3, half: f32, spacing: f32, color: [f32; 3]) {
+    let cx = (center.x / spacing).round() * spacing;
+    let cz = (center.z / spacing).round() * spacing;
+    let n = (half / spacing) as i32;
+    for i in -n..=n {
+        let off = i as f32 * spacing;
+        push_line(
+            v,
+            Vec3::new(cx - half, 0.0, cz + off),
+            Vec3::new(cx + half, 0.0, cz + off),
+            color,
+        );
+        push_line(
+            v,
+            Vec3::new(cx + off, 0.0, cz - half),
+            Vec3::new(cx + off, 0.0, cz + half),
+            color,
+        );
     }
 }
 
@@ -1394,6 +1518,14 @@ impl App {
         fallback
     }
 
+    /// Toggle the sensors-manager view (dimmed scene + tactical grid + sensor
+    /// spheres). Local UI only.
+    fn toggle_sensors(&mut self) {
+        self.sensors_open = !self.sensors_open;
+        #[cfg(target_arch = "wasm32")]
+        set_sensors_ui(self.sensors_open);
+    }
+
     /// Lock the camera onto the focus candidate, or unlock if already locked
     /// onto it (so the button toggles).
     fn toggle_focus(&mut self) {
@@ -1477,6 +1609,11 @@ impl App {
                     self.toggle_focus();
                 }
             }
+            Key::Character("v") | Key::Character("V") => {
+                if first {
+                    self.toggle_sensors();
+                }
+            }
             Key::Named(NamedKey::Escape) => {
                 if first {
                     self.selected.clear();
@@ -1550,6 +1687,7 @@ impl App {
                 }),
                 UiCmd::TogglePause => self.toggle_pause(),
                 UiCmd::ToggleFocus => self.toggle_focus(),
+                UiCmd::ToggleSensors => self.toggle_sensors(),
             }
         }
     }
@@ -1732,6 +1870,20 @@ fn spawn_demo_fleet(world: &mut World) {
                 angle,
             },
         );
+    }
+
+    // An enemy strike group inbound from one flank. It starts beyond the fleet's
+    // sensors (hidden by fog of war) and advances on the mothership, popping into
+    // view as it crosses a player sensor sphere. The AI is movement-only for now.
+    let enemy = [
+        (ShipClass::Corvette, Vec3::new(120.0, 0.0, -90.0)),
+        (ShipClass::Fighter, Vec3::new(128.0, 4.0, -84.0)),
+        (ShipClass::Fighter, Vec3::new(128.0, -4.0, -96.0)),
+        (ShipClass::Bomber, Vec3::new(134.0, 0.0, -90.0)),
+        (ShipClass::FrigateGeneral, Vec3::new(140.0, 0.0, -92.0)),
+    ];
+    for (class, pos) in enemy {
+        world.spawn_class(class, Team::Enemy, pos);
     }
 }
 
@@ -2093,6 +2245,8 @@ enum UiCmd {
     TogglePause,
     /// Toggle camera lock-on to the selected ship (or mothership).
     ToggleFocus,
+    /// Toggle the sensors-manager view.
+    ToggleSensors,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2120,6 +2274,7 @@ fn wire_dom_controls() {
         ("sol-pause", UiCmd::TogglePause),
         ("sol-bo-pause", UiCmd::TogglePause),
         ("sol-focus", UiCmd::ToggleFocus),
+        ("sol-sensors", UiCmd::ToggleSensors),
     ] {
         if let Some(el) = doc.get_element_by_id(id) {
             let cb = Closure::<dyn FnMut()>::new(move || push_ui(cmd));
@@ -2233,6 +2388,16 @@ fn set_focus_ui(active: bool) {
         if let Some(el) = doc.get_element_by_id("sol-focus") {
             let _ = el.class_list().toggle_with_force("active", active);
             el.set_text_content(Some(if active { "Unfocus" } else { "Focus" }));
+        }
+    }
+}
+
+/// Reflect the sensors-manager view state on the Sensors button (active class).
+#[cfg(target_arch = "wasm32")]
+fn set_sensors_ui(active: bool) {
+    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+        if let Some(el) = doc.get_element_by_id("sol-sensors") {
+            let _ = el.class_list().toggle_with_force("active", active);
         }
     }
 }

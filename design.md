@@ -716,6 +716,7 @@ the target as the order set lands:
 | Clear selection | **`Esc`** or the **Clear** button |
 | Open build overlay | **Build** HUD button (Esc / **Close** to exit); build mode hides the in-world controls + camera pad |
 | Focus camera on ship | **`F`** or the **Focus** button: locks onto the selected ship (or the mothership); any pan unlocks |
+| Sensors-manager view | **`V`** or the **Sensors** button: dims the scene, draws the tactical grid + sensor spheres |
 | Pause / resume | **`Space`** or the **Pause** button (works any time, incl. over the build overlay) |
 
 **Pause is single-player, local, and active.** It stops *advancing* the
@@ -740,6 +741,23 @@ selected ship, or the mothership when nothing is selected, and tracks it each
 frame; orbit and zoom still work, so you circle the locked ship. Any pan input
 (`WASD`/arrows, edge-scroll, or the mobile joystick) releases the lock, matching
 the target table's focus-on-selection role for `F`.
+
+**Sensors, fog of war, and enemy AI (current build).** A first slice of the
+[sensors model](#65-sensors-emissions--fog-of-war) and the AI is in: each ship
+class carries a `sensor_range` (a `Blueprint` field, deterministic), an enemy
+strike group (`Team::Enemy`) spawns inbound, and a **movement-only** enemy AI
+runs in `World::step` (deterministic: it reads each step's start positions,
+writes only orders, iterates in stable id order). Each enemy steers toward the
+nearest player ship inside its sensor range, and advances on the mothership when
+it has no direct contact. **Fog of war** is enforced in the view: an enemy is
+drawn only while inside some player ship's sensor sphere (a local-UI computation
+that never feeds the sim). The **Sensors-manager view** (`V` / the **Sensors**
+button) dims the 3D scene with a full-screen quad drawn beneath the world-space
+gizmos (`Renderer::set_scene_dim`), then draws a tactical grid and a wireframe
+sensor sphere around each player ship, with detected enemies flagged by a ground
+blip. **Weapons are deliberately absent for now**: ballistics, bombs, and
+missiles are the next slice (see [§6.8](#68-ballistics--projectiles)); hull,
+teams, and sensor range are already in place as the foundation.
 
 Because `WASD` pans here, the target table's `W/S/D` order keys (waypoint / stop /
 dock) are not yet bound; `Stop` and `Select All` move to `Shift+S` / `Shift+A`

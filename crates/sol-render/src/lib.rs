@@ -278,6 +278,9 @@ pub struct Renderer {
     overlay_line_pipeline: wgpu::RenderPipeline,
     overlay_tris: DynamicBuffer,
     overlay_lines: DynamicBuffer,
+    /// Full-screen dim quad for sensors-manager view, drawn over the 3D scene
+    /// but under the gizmo lines so sensor rings stay bright. Empty = no dim.
+    scene_dim: DynamicBuffer,
 
     /// Reusable per-frame instance buffer (grown as needed).
     instance_buffer: wgpu::Buffer,
@@ -600,6 +603,7 @@ impl Renderer {
         let particles = DynamicBuffer::new(&device, "particles", 4096);
         let overlay_tris = DynamicBuffer::new(&device, "overlay tris", 4096);
         let overlay_lines = DynamicBuffer::new(&device, "overlay lines", 1024);
+        let scene_dim = DynamicBuffer::new(&device, "scene dim", 256);
 
         let instance_capacity = 256;
         let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -631,6 +635,7 @@ impl Renderer {
             overlay_line_pipeline,
             overlay_tris,
             overlay_lines,
+            scene_dim,
             instance_buffer,
             instance_capacity,
         })
@@ -815,6 +820,27 @@ impl Renderer {
             .upload(&self.device, &self.queue, "particles", particles);
     }
 
+    /// Set the sensors-manager scene dim: a full-screen alpha quad drawn over
+    /// the 3D scene (ships, nebula, grid) but UNDER the world-space gizmo lines,
+    /// so sensor rings and the tactical grid stay bright. Alpha <= 0 clears it.
+    pub fn set_scene_dim(&mut self, rgba: [f32; 4]) {
+        let verts: &[OverlayVertex] = &if rgba[3] <= 0.0 {
+            Vec::new()
+        } else {
+            // Two triangles covering clip space [-1, 1].
+            vec![
+                OverlayVertex::new([-1.0, -1.0], rgba),
+                OverlayVertex::new([1.0, -1.0], rgba),
+                OverlayVertex::new([1.0, 1.0], rgba),
+                OverlayVertex::new([-1.0, -1.0], rgba),
+                OverlayVertex::new([1.0, 1.0], rgba),
+                OverlayVertex::new([-1.0, 1.0], rgba),
+            ]
+        };
+        self.scene_dim
+            .upload(&self.device, &self.queue, "scene dim", verts);
+    }
+
     /// Draw several mesh groups in one pass: each group is a mesh plus the
     /// instances drawn with it, so the whole fleet renders with a single clear.
     /// Groups share one instance buffer via contiguous per-group ranges.
@@ -943,6 +969,14 @@ impl Renderer {
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
                 pass.set_vertex_buffer(0, self.particles.buffer.slice(..));
                 pass.draw(0..6, 0..self.particles.count);
+            }
+
+            // Sensors-manager scene dim: a full-screen alpha quad over the 3D
+            // scene but beneath the gizmos, so sensor rings/grid stay bright.
+            if self.scene_dim.count > 0 {
+                pass.set_pipeline(&self.overlay_tri_pipeline);
+                pass.set_vertex_buffer(0, self.scene_dim.buffer.slice(..));
+                pass.draw(0..self.scene_dim.count, 0..1);
             }
 
             // World-space selection gizmos on top of the ships (camera-transformed

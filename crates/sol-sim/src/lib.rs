@@ -151,6 +151,9 @@ pub struct Blueprint {
     pub cost: f32,
     /// Build time in seconds (demo-tuned; shorter than the eventual values).
     pub build_time: f32,
+    /// Sensor range (world units): how far this ship detects other teams.
+    /// Drives enemy AI target acquisition and the sensors-manager fog of war.
+    pub sensor_range: f32,
 }
 
 /// Read-only table of per-class blueprints. Lookups are by key (deterministic);
@@ -238,15 +241,15 @@ impl ShipRegistry {
             // Crew requirement (of the class's CrewKind), salvage cost, and build
             // seconds. Carriers require no crew: they PROVIDE the pool (see
             // CARRIER_CREW_*). Demo-tuned; eventual values live in ship.json.
-            let (crew, cost, build_time): (u32, f32, f32) = match class {
-                ShipClass::Fighter => (1, 30.0, 4.0),
-                ShipClass::Bomber => (2, 50.0, 6.0),
-                ShipClass::Corvette => (10, 120.0, 8.0),
-                ShipClass::Resourcer => (3, 80.0, 7.0),
-                ShipClass::FrigateGeneral => (100, 300.0, 16.0),
-                ShipClass::FrigateMissile => (100, 340.0, 18.0),
-                ShipClass::CapitalDestroyer => (400, 900.0, 30.0),
-                ShipClass::Carrier => (0, 5000.0, 60.0),
+            let (crew, cost, build_time, sensor_range): (u32, f32, f32, f32) = match class {
+                ShipClass::Fighter => (1, 30.0, 4.0, 30.0),
+                ShipClass::Bomber => (2, 50.0, 6.0, 28.0),
+                ShipClass::Corvette => (10, 120.0, 8.0, 40.0),
+                ShipClass::Resourcer => (3, 80.0, 7.0, 35.0),
+                ShipClass::FrigateGeneral => (100, 300.0, 16.0, 55.0),
+                ShipClass::FrigateMissile => (100, 340.0, 18.0, 60.0),
+                ShipClass::CapitalDestroyer => (400, 900.0, 30.0, 70.0),
+                ShipClass::Carrier => (0, 5000.0, 60.0, 90.0),
             };
             blueprints.insert(
                 class,
@@ -262,6 +265,7 @@ impl ShipRegistry {
                     cargo,
                     cost,
                     build_time,
+                    sensor_range,
                 },
             );
         }
@@ -657,6 +661,39 @@ impl World {
             .find(|e| e.ship.class == ShipClass::Carrier && e.ship.team == Team::Player)
             .map(|e| (e.transform.pos, self.registry.get(e.ship.class).radius));
 
+        // 2b) Enemy AI (movement only): each enemy steers toward the nearest
+        // player ship within its sensor range; lacking direct contact it advances
+        // on the mothership (`depot`) as its objective, and idles only if there is
+        // no mothership. Deterministic: reads this step's start positions, writes
+        // only orders, and iterates in stable id order, so it is order independent.
+        let player_positions: Vec<Vec3> = self
+            .entities
+            .iter()
+            .filter(|e| e.ship.team == Team::Player)
+            .map(|e| e.transform.pos)
+            .collect();
+        if !player_positions.is_empty() {
+            let rally = depot.map(|(p, _)| p);
+            for e in &mut self.entities {
+                if e.ship.team != Team::Enemy {
+                    continue;
+                }
+                let range = self.registry.get(e.ship.class).sensor_range;
+                let max_d2 = range * range;
+                let my = e.transform.pos;
+                let mut best_d2 = f32::INFINITY;
+                let mut best: Option<Vec3> = None;
+                for &p in &player_positions {
+                    let d2 = (p - my).length_squared();
+                    if d2 <= max_d2 && d2 < best_d2 {
+                        best_d2 = d2;
+                        best = Some(p);
+                    }
+                }
+                e.order = best.or(rally);
+            }
+        }
+
         // 3) Advance each entity. Patrols follow their circle; otherwise steer
         // toward a goal (a gather target approached to just outside its surface,
         // else a manual move order) with arrive + separation, clamped to limits.
@@ -1038,6 +1075,62 @@ mod tests {
             e.velocity.linear.length() < 0.5,
             "did not stop: {:?}",
             e.velocity.linear
+        );
+    }
+
+    #[test]
+    fn enemy_ai_closes_on_player_in_sensor_range() {
+        let mut w = World::new(7);
+        w.spawn_class(ShipClass::Corvette, Team::Player, Vec3::ZERO);
+        // Fighter sensor range is 30 > 20, so it detects and approaches.
+        let e = w.spawn_class(ShipClass::Fighter, Team::Enemy, Vec3::new(20.0, 0.0, 0.0));
+        let start = w.entity(e).unwrap().transform.pos.length();
+        for _ in 0..(TICK_HZ * 3) {
+            w.step(TICK_DT);
+        }
+        let end = w.entity(e).unwrap().transform.pos.length();
+        assert!(
+            end < start - 1.0,
+            "enemy should close on the player: {start} -> {end}"
+        );
+    }
+
+    #[test]
+    fn enemy_ai_holds_without_contact_or_mothership() {
+        let mut w = World::new(7);
+        // Player side is a lone Corvette (no mothership/rally point).
+        w.spawn_class(ShipClass::Corvette, Team::Player, Vec3::ZERO);
+        // Far beyond any sensor range: no contact and no rally, so the enemy holds.
+        let far = Vec3::new(300.0, 0.0, 0.0);
+        let e = w.spawn_class(ShipClass::Fighter, Team::Enemy, far);
+        for _ in 0..(TICK_HZ * 3) {
+            w.step(TICK_DT);
+        }
+        let ent = w.entity(e).unwrap();
+        assert!(ent.order.is_none(), "should have no target without contact");
+        assert!(
+            (ent.transform.pos - far).length() < 0.5,
+            "should hold position: {:?}",
+            ent.transform.pos
+        );
+    }
+
+    #[test]
+    fn enemy_ai_advances_on_mothership_without_contact() {
+        let mut w = World::new(9);
+        w.spawn_class(ShipClass::Carrier, Team::Player, Vec3::ZERO);
+        // Enemy far beyond its own sensor range of any player, so it has no direct
+        // contact, yet it still advances on the mothership objective.
+        let far = Vec3::new(300.0, 0.0, 0.0);
+        let e = w.spawn_class(ShipClass::Fighter, Team::Enemy, far);
+        let start = w.entity(e).unwrap().transform.pos.length();
+        for _ in 0..(TICK_HZ * 3) {
+            w.step(TICK_DT);
+        }
+        let end = w.entity(e).unwrap().transform.pos.length();
+        assert!(
+            end < start - 1.0,
+            "enemy should advance on the mothership: {start} -> {end}"
         );
     }
 

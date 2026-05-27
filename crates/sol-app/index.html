@@ -99,8 +99,9 @@
         background: #1c4a73;
         border-color: #4f9fe0;
       }
-      /* Highlight the Focus button while the camera is locked onto a ship. */
-      #sol-focus.active {
+      /* Highlight the Focus / Sensors buttons while their mode is active. */
+      #sol-focus.active,
+      #sol-sensors.active {
         background: #1c4a73;
         border-color: #6fb2ee;
         color: #fff;
@@ -133,10 +134,13 @@
         pointer-events: auto;
         /* A drag on the empty centre rotates the ship; don't scroll the page. */
         touch-action: none;
+        /* Homeworld-style blue gradient backdrop; the centre stays transparent so
+           the wgpu canvas behind shows the rotating ship preview. */
         background: radial-gradient(
-          circle at 60% 45%,
-          rgba(4, 8, 16, 0) 30%,
-          rgba(4, 8, 16, 0.55) 100%
+          circle at 50% 44%,
+          rgba(24, 64, 130, 0) 24%,
+          rgba(14, 44, 96, 0.42) 60%,
+          rgba(6, 20, 52, 0.82) 100%
         );
         font-family: system-ui, sans-serif;
       }
@@ -527,6 +531,7 @@
       <button id="sol-box-select" type="button">Box Select</button>
       <button id="sol-formation" type="button">Form: Parade</button>
       <button id="sol-focus" type="button">Focus</button>
+      <button id="sol-sensors" type="button">Sensors</button>
       <button id="sol-stop" type="button">Stop</button>
       <button id="sol-clear" type="button">Clear</button>
     </div>
