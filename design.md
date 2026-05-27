@@ -1324,10 +1324,13 @@ Three deliverables, all live on GitHub Pages from the first commit:
   rises. All gather/harvest/deposit state lives in the deterministic sim (node
   amounts and the salvage pool are in the checksum); asteroid positions/amounts
   are seeded so they are identical across peers.
-- **Production (prototype build menu):** a HUD **Build** menu queues ship classes
-  for construction at the mothership. A build needs both **salvage and free crew**
-  ([§5](#5-crew-capture--research)); the menu greys out options the player can't
-  afford. Salvage is debited up front (a `Build` command), the front of the queue
+- **Production (prototype build menu):** a full-screen **Build** overlay (opened
+  from the HUD) lists the ship classes down a sidebar and shows the selected one
+  as a slowly rotating **3D preview** (the wgpu canvas renders it behind the
+  overlay's transparent centre while in-world input is suspended). A build needs
+  both **salvage and free crew** ([§5](#5-crew-capture--research)); unaffordable
+  options are greyed and the confirm button disables. Salvage is debited up front
+  (a `Build` command), the front of the queue
   accrues build time each fixed step, and on completion the ship spawns next to
   the carrier at a spread angle. The queue and per-item progress are deterministic
   sim state (in the checksum); the menu, like all controls, drives the same

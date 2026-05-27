@@ -13,6 +13,8 @@ use sol_render::{
     BgVertex, CpuMesh, CpuTexture, GpuMesh, MeshInstance, OrbitCamera, OverlayVertex,
     RenderOutcome, Renderer, StarInstance, Vertex,
 };
+#[cfg(target_arch = "wasm32")]
+use sol_sim::CrewKind;
 use sol_sim::{Command, EntityId, Patrol, ShipClass, Team, World};
 
 /// Group-move arrangement applied by [`App::issue_move`]. Local UI state only
@@ -223,6 +225,11 @@ struct App {
     selected: Vec<EntityId>,
     /// Active group-move arrangement (cycled with `F` / the HUD button).
     formation: Formation,
+    /// Whether the full-screen build overlay is open (shows a 3D ship preview;
+    /// in-world input is suspended while it is up).
+    build_open: bool,
+    /// Ship class currently previewed in the build overlay.
+    build_preview: ShipClass,
     /// In-progress band-select rectangle as (start, current) in physical pixels.
     /// Set while dragging (desktop LMB, or mobile with the box-select button
     /// held); drawn as a HUD rectangle and finalized on release.
@@ -268,6 +275,8 @@ impl App {
             elapsed: 0.0,
             selected: Vec::new(),
             formation: Formation::Parade,
+            build_open: false,
+            build_preview: ShipClass::Fighter,
             select_box: None,
             box_select_armed: false,
             pan_keys: PanKeys::default(),
@@ -406,6 +415,50 @@ impl App {
         } else {
             0.0
         };
+
+        // Build overlay: render a slow turntable preview of the selected ship in
+        // place of the fleet (the DOM overlay frames it with the class list and
+        // stats). The sim keeps running underneath so the economy stays live.
+        if self.build_open {
+            let class = self.build_preview;
+            let radius = self.world.registry.get(class).radius;
+            let cam = OrbitCamera {
+                focus: Vec3::ZERO,
+                pitch: 0.32,
+                yaw: self.elapsed * 0.5,
+                distance: radius * 3.5 + 6.0,
+                ..OrbitCamera::default()
+            };
+            let model = Mat4::from_scale_rotation_translation(
+                Vec3::splat(class_scale(class)),
+                Quat::IDENTITY,
+                Vec3::ZERO,
+            );
+            let inst = [MeshInstance::with_tint(
+                model,
+                livery_color(class, Team::Player),
+            )];
+            #[cfg(target_arch = "wasm32")]
+            {
+                set_resources(self.world.salvage, 0.0);
+                set_crew(&self.world);
+                update_build_overlay(&self.world, class);
+            }
+            let gfx = self.graphics.as_mut().unwrap();
+            gfx.renderer.set_overlays(&[], &[], &[]);
+            gfx.renderer.set_particles(&[]);
+            let groups: Vec<(&GpuMesh, &[MeshInstance])> = gfx
+                .meshes
+                .get(&class)
+                .map(|m| (m, inst.as_slice()))
+                .into_iter()
+                .collect();
+            let _ = gfx.renderer.render_groups(&cam, &groups);
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+            return;
+        }
 
         // Window drawable size, for projecting world points to the HUD overlay.
         let (vw, vh) = match &self.window {
@@ -584,7 +637,6 @@ impl App {
         {
             set_resources(self.world.salvage, carrying_total);
             set_crew(&self.world);
-            update_build_buttons(&self.world);
             let status = match self.world.build_queue.first() {
                 Some(b) => {
                     let bt = self.world.registry.get(b.class).build_time.max(0.001);
@@ -912,6 +964,10 @@ impl App {
     /// never touches the sim. `dt` is real frame time, so panning is smooth and
     /// framerate independent.
     fn apply_camera_pan(&mut self, dt: f32) {
+        // The build overlay suspends in-world camera control.
+        if self.build_open {
+            return;
+        }
         let (mut rx, mut fy, mut elev) = self.pan_keys.axes();
 
         // Desktop edge-scroll: cursor near an edge pans that way. Gated on a real
@@ -1206,6 +1262,15 @@ impl App {
         let pressed = event.state == ElementState::Pressed;
         // One-shot actions fire on the initial press, not on auto-repeat.
         let first = pressed && !event.repeat;
+        // While the build overlay is open, in-world keys are suspended; Esc closes.
+        if self.build_open {
+            if first && event.logical_key == Key::Named(NamedKey::Escape) {
+                self.build_open = false;
+                #[cfg(target_arch = "wasm32")]
+                show_build_overlay(false);
+            }
+            return;
+        }
         match event.logical_key.as_ref() {
             Key::Character("w") | Key::Character("W") | Key::Named(NamedKey::ArrowUp) => {
                 self.pan_keys.forward = pressed;
@@ -1298,7 +1363,18 @@ impl App {
                     set_formation_label(self.formation.label());
                 }
                 UiCmd::BoxSelectArm(on) => self.box_select_armed = on,
-                UiCmd::Build(class) => self.world.enqueue(Command::Build { class }),
+                UiCmd::OpenBuild => {
+                    self.build_open = true;
+                    show_build_overlay(true);
+                }
+                UiCmd::CloseBuild => {
+                    self.build_open = false;
+                    show_build_overlay(false);
+                }
+                UiCmd::PreviewBuild(class) => self.build_preview = class,
+                UiCmd::BuildSelected => self.world.enqueue(Command::Build {
+                    class: self.build_preview,
+                }),
             }
         }
     }
@@ -1831,8 +1907,13 @@ enum UiCmd {
     /// Mobile: arm (true) / disarm (false) the band-box drag while the button
     /// is held.
     BoxSelectArm(bool),
-    /// Queue a ship of this class for construction at the mothership.
-    Build(ShipClass),
+    /// Open / close the full-screen build overlay.
+    OpenBuild,
+    CloseBuild,
+    /// Select a class to preview in the build overlay.
+    PreviewBuild(ShipClass),
+    /// Queue the currently previewed class for construction (if affordable).
+    BuildSelected,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1864,10 +1945,22 @@ fn wire_dom_controls() {
             cb.forget();
         }
     }
-    // Build-menu buttons: each queues a ship class for construction.
+    // Build overlay open/confirm/close.
+    for (id, cmd) in [
+        ("sol-build-toggle", UiCmd::OpenBuild),
+        ("sol-bo-build", UiCmd::BuildSelected),
+        ("sol-bo-close", UiCmd::CloseBuild),
+    ] {
+        if let Some(el) = doc.get_element_by_id(id) {
+            let cb = Closure::<dyn FnMut()>::new(move || push_ui(cmd));
+            let _ = el.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref());
+            cb.forget();
+        }
+    }
+    // Build-overlay class cards: clicking one previews that class.
     for (id, class) in BUILD_BUTTONS {
         if let Some(el) = doc.get_element_by_id(id) {
-            let cb = Closure::<dyn FnMut()>::new(move || push_ui(UiCmd::Build(class)));
+            let cb = Closure::<dyn FnMut()>::new(move || push_ui(UiCmd::PreviewBuild(class)));
             let _ = el.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref());
             cb.forget();
         }
@@ -1930,20 +2023,55 @@ const BUILD_BUTTONS: [(&str, ShipClass); 7] = [
     ("sol-build-capital_destroyer", ShipClass::CapitalDestroyer),
 ];
 
-/// Grey out (disable) build buttons the player can't currently afford (salvage
-/// or crew). Called each frame so the menu tracks the live economy.
+/// Show or hide the full-screen build overlay.
 #[cfg(target_arch = "wasm32")]
-fn update_build_buttons(world: &World) {
+fn show_build_overlay(show: bool) {
+    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+        if let Some(el) = doc.get_element_by_id("sol-build-overlay") {
+            if show {
+                let _ = el.remove_attribute("hidden");
+            } else {
+                let _ = el.set_attribute("hidden", "");
+            }
+        }
+    }
+}
+
+/// Per-frame build-overlay refresh: highlight the previewed class, dim the
+/// classes the player can't afford, fill the info line, and enable/disable the
+/// confirm button by affordability (salvage + crew).
+#[cfg(target_arch = "wasm32")]
+fn update_build_overlay(world: &World, preview: ShipClass) {
     let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
         return;
     };
     for (id, class) in BUILD_BUTTONS {
         if let Some(el) = doc.get_element_by_id(id) {
-            if world.can_build(class) {
-                let _ = el.remove_attribute("disabled");
-            } else {
-                let _ = el.set_attribute("disabled", "");
-            }
+            let cl = el.class_list();
+            let _ = cl.toggle_with_force("sel", class == preview);
+            let _ = cl.toggle_with_force("poor", !world.can_build(class));
+        }
+    }
+    let bp = world.registry.get(preview);
+    let kind = match preview.crew_kind() {
+        CrewKind::Ops => "ops",
+        CrewKind::Pilots => "pilots",
+    };
+    if let Some(el) = doc.get_element_by_id("sol-bo-info") {
+        el.set_text_content(Some(&format!(
+            "{}    cost {}    crew {} {}    build {}s",
+            class_label(preview),
+            bp.cost as i64,
+            bp.crew,
+            kind,
+            bp.build_time as i64
+        )));
+    }
+    if let Some(el) = doc.get_element_by_id("sol-bo-build") {
+        if world.can_build(preview) {
+            let _ = el.remove_attribute("disabled");
+        } else {
+            let _ = el.set_attribute("disabled", "");
         }
     }
 }

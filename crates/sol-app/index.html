@@ -116,37 +116,104 @@
       #sol-shift-hint[hidden] {
         display: none;
       }
-      /* Build menu: a column of class buttons that pops up above the controls. */
-      #sol-build-panel {
+      /* Full-screen build overlay. It captures all input (so the game pauses
+         interaction) but leaves the centre transparent: the wgpu canvas behind
+         renders a rotating 3D preview of the selected ship there. */
+      #sol-build-overlay {
         position: fixed;
-        left: 10px;
-        bottom: 56px;
-        z-index: 22;
+        inset: 0;
+        z-index: 40;
         display: flex;
-        flex-direction: column;
-        gap: 6px;
+        pointer-events: auto;
+        background: radial-gradient(
+          circle at 60% 45%,
+          rgba(4, 8, 16, 0) 30%,
+          rgba(4, 8, 16, 0.55) 100%
+        );
+        font-family: system-ui, sans-serif;
       }
-      #sol-build-panel[hidden] {
+      #sol-build-overlay[hidden] {
         display: none;
       }
-      #sol-build-panel button {
+      /* Left sidebar: the class list. */
+      #sol-bo-list {
+        width: 232px;
+        height: 100%;
+        box-sizing: border-box;
+        padding: 16px 14px;
+        background: rgba(6, 12, 22, 0.92);
+        border-right: 1px solid #1d3a57;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        overflow-y: auto;
+      }
+      #sol-bo-list .bo-title {
+        color: #eaf2ff;
+        font-size: 18px;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        margin-bottom: 6px;
+      }
+      #sol-bo-list button {
         appearance: none;
         border: 1px solid #2b6cb0;
         border-radius: 8px;
         background: rgba(11, 26, 43, 0.92);
         color: #cfe0f5;
-        font: 600 13px/1 system-ui, sans-serif;
-        padding: 9px 12px;
+        font: 600 14px/1 system-ui, sans-serif;
+        padding: 11px 12px;
         text-align: left;
       }
-      #sol-build-panel button:active {
+      #sol-bo-list button.sel {
         background: #1c4a73;
+        border-color: #6fb2ee;
+        color: #fff;
       }
-      /* Unaffordable build options are greyed out and inert. */
-      #sol-build-panel button:disabled {
+      #sol-bo-list button.poor {
+        opacity: 0.45;
+      }
+      /* Bottom info bar: previewed ship stats + confirm / close. */
+      #sol-bo-bar {
+        position: fixed;
+        left: 252px;
+        right: 20px;
+        bottom: 20px;
+        z-index: 41;
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 12px 16px;
+        background: rgba(6, 12, 22, 0.92);
+        border: 1px solid #1d3a57;
+        border-radius: 12px;
+      }
+      #sol-bo-info {
+        flex: 1;
+        color: #cfe0f5;
+        font: 600 15px/1.2 system-ui, sans-serif;
+      }
+      #sol-bo-bar button {
+        appearance: none;
+        border-radius: 8px;
+        font: 700 14px/1 system-ui, sans-serif;
+        padding: 12px 18px;
+      }
+      #sol-bo-build {
+        border: 1px solid #2f9e57;
+        background: #16683a;
+        color: #eafff1;
+      }
+      #sol-bo-build:disabled {
         opacity: 0.4;
         border-color: #34465a;
+        background: #233040;
         cursor: default;
+      }
+      #sol-bo-close {
+        border: 1px solid #2b6cb0;
+        background: rgba(11, 26, 43, 0.92);
+        color: #cfe0f5;
       }
       /* Crew + current-production readouts, top-left under the salvage counter. */
       #sol-crew,
@@ -330,14 +397,22 @@
     <div id="sol-resources">Salvage: 0</div>
     <div id="sol-crew"></div>
     <div id="sol-build-status"></div>
-    <div id="sol-build-panel" hidden>
-      <button id="sol-build-fighter" type="button">Fighter (30)</button>
-      <button id="sol-build-bomber" type="button">Bomber (50)</button>
-      <button id="sol-build-corvette" type="button">Corvette (120)</button>
-      <button id="sol-build-resourcer" type="button">Resourcer (80)</button>
-      <button id="sol-build-frigate_general" type="button">Frigate (300)</button>
-      <button id="sol-build-frigate_missile" type="button">Missile Frigate (340)</button>
-      <button id="sol-build-capital_destroyer" type="button">Destroyer (900)</button>
+    <div id="sol-build-overlay" hidden>
+      <div id="sol-bo-list">
+        <div class="bo-title">BUILD</div>
+        <button id="sol-build-fighter" type="button">Fighter (30)</button>
+        <button id="sol-build-bomber" type="button">Bomber (50)</button>
+        <button id="sol-build-corvette" type="button">Corvette (120)</button>
+        <button id="sol-build-resourcer" type="button">Resourcer (80)</button>
+        <button id="sol-build-frigate_general" type="button">Frigate (300)</button>
+        <button id="sol-build-frigate_missile" type="button">Missile Frigate (340)</button>
+        <button id="sol-build-capital_destroyer" type="button">Destroyer (900)</button>
+      </div>
+      <div id="sol-bo-bar">
+        <div id="sol-bo-info">Fighter</div>
+        <button id="sol-bo-build" type="button">Build</button>
+        <button id="sol-bo-close" type="button">Close</button>
+      </div>
     </div>
     <div id="sol-controls">
       <button id="sol-build-toggle" type="button">Build</button>
@@ -347,19 +422,6 @@
       <button id="sol-stop" type="button">Stop</button>
       <button id="sol-clear" type="button">Clear</button>
     </div>
-    <script>
-      // Toggle the build menu open/closed (the buttons themselves are wired to
-      // the wasm command queue in Rust).
-      (function () {
-        var t = document.getElementById("sol-build-toggle");
-        var p = document.getElementById("sol-build-panel");
-        if (t && p) {
-          t.addEventListener("click", function () {
-            p.hidden = !p.hidden;
-          });
-        }
-      })();
-    </script>
     <div id="sol-shift-hint" hidden>Shift: A = Select All, S = Stop</div>
     <div id="sol-pad">
       <div id="sol-elev">
