@@ -96,3 +96,10 @@ Items that fail get moved back to Pending with a note on what's still wrong.
   the node's footprint), alongside the existing ship blips.
 - [ ] **(19) Resource dust puff bigger.** Mining motes: 10 -> 18 sprites,
   ~3x sprite size, brighter, wider jitter. Hauler trail also enlarged.
+- [ ] **(20) Parade formation: tight per-class rows.** Rewrote
+  `parade_slots` so each class forms a single row centered on the formation
+  axis with **lateral spacing = 2 * class radius**, and rows stack
+  front-to-back (carrier in front, capitals next, harvesters at the rear)
+  with a depth gap of `r_prev + r_next + small pad`. Fighters (radius 1.0)
+  now sit ~2 units apart instead of ~22; carriers no longer blow out the
+  whole formation's width.

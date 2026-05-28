@@ -1151,15 +1151,6 @@ fn formation_right(forward: Vec3) -> Vec3 {
     Vec3::new(f.z, 0.0, -f.x)
 }
 
-/// Alternate a paired class between right (+) and left (-) lanes of magnitude
-/// `mag`, so each such class fills both flanks evenly. State is keyed by `mag`.
-fn paired_column(sides: &mut HashMap<i32, bool>, mag: i32) -> i32 {
-    let go_left = sides.entry(mag).or_insert(false);
-    let col = if *go_left { -mag } else { mag };
-    *go_left = !*go_left;
-    col
-}
-
 /// Front-to-back ordering within a parade column (capitals lead, resourcers
 /// trail). Lower ranks sit nearer the front.
 fn class_depth_rank(class: ShipClass) -> u8 {
@@ -1686,51 +1677,58 @@ impl App {
         }
     }
 
-    /// "Military parade": class-segregated columns oriented to `forward`. The
-    /// carrier holds front-center; capitals trail it, frigates take the inner
-    /// flanks, corvettes the next lanes, fighters/bombers the wings, and
-    /// resourcers the rear. Each (column, depth) cell is unique so ships never
-    /// stack (the sim's separation then only fine-tunes spacing).
+    /// "Military parade": one **tight row per class** (fix-it.md item 20).
+    /// Ships of a given class line up centered on the formation axis with
+    /// **spacing = 2 * class radius**, so an unbroken row of fighters sits
+    /// tighter than a row of frigates. Rows stack front-to-back in
+    /// `class_depth_rank` order (carrier in front, capitals next, harvesters
+    /// at the rear); the depth gap between two rows is the sum of their
+    /// radii plus a small pad so the rows touch but don't overlap.
     fn parade_slots(
         &self,
         ids: &[EntityId],
         center: Vec3,
         forward: Vec3,
-        max_r: f32,
+        _max_r: f32,
     ) -> Vec<(EntityId, Vec3)> {
         let right = formation_right(forward);
-        let col_space = max_r * 2.5 + 2.0;
-        let row_space = max_r * 2.2 + 2.0;
 
-        // Phase 1: assign each ship a signed column from its class, splitting
-        // paired-lane classes evenly left/right in selection order.
-        let mut sides = HashMap::<i32, bool>::new();
-        let mut by_col: std::collections::BTreeMap<i32, Vec<(EntityId, ShipClass)>> =
+        // Bucket selection by class, preserving id order within each class so
+        // the lateral positions stay stable across re-issues of the order.
+        let mut by_class: std::collections::BTreeMap<u8, (ShipClass, Vec<EntityId>)> =
             std::collections::BTreeMap::new();
         for &id in ids {
             let Some(e) = self.world.entity(id) else {
                 continue;
             };
-            let class = e.ship.class;
-            let col = match class {
-                ShipClass::Carrier | ShipClass::CapitalDestroyer | ShipClass::Resourcer => 0,
-                ShipClass::FrigateGeneral | ShipClass::FrigateMissile => {
-                    paired_column(&mut sides, 1)
-                }
-                ShipClass::Corvette | ShipClass::Salvager => paired_column(&mut sides, 2),
-                ShipClass::Fighter | ShipClass::Bomber => paired_column(&mut sides, 3),
-            };
-            by_col.entry(col).or_default().push((id, class));
+            let key = class_depth_rank(e.ship.class);
+            by_class
+                .entry(key)
+                .or_insert_with(|| (e.ship.class, Vec::new()))
+                .1
+                .push(id);
         }
 
-        // Phase 2: within each column, order by class (capitals front) and stack
-        // front-to-back so no two ships share a cell.
         let mut out = Vec::with_capacity(ids.len());
-        for (col, mut ships) in by_col {
-            ships.sort_by_key(|(_, c)| class_depth_rank(*c));
-            for (depth, (id, _)) in ships.into_iter().enumerate() {
-                let pos = center + right * (col as f32 * col_space)
-                    - forward * (depth as f32 * row_space);
+        let mut depth = 0.0_f32;
+        let mut prev_r = 0.0_f32;
+        let mut first = true;
+        for (_, (class, ships)) in by_class {
+            let r = self.world.registry.get(class).radius;
+            let spacing = r * 2.0;
+            if !first {
+                // Gap between rows: half the previous row's diameter + half
+                // this row's diameter + a small pad.
+                depth += prev_r + r + 1.5;
+            }
+            first = false;
+            prev_r = r;
+
+            let n = ships.len();
+            let half = (n as f32 - 1.0) * 0.5;
+            for (k, id) in ships.into_iter().enumerate() {
+                let lateral = (k as f32 - half) * spacing;
+                let pos = center + right * lateral - forward * depth;
                 out.push((id, pos));
             }
         }
