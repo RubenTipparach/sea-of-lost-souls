@@ -1041,6 +1041,7 @@ impl App {
                 None => String::new(),
             };
             set_build_status(&status);
+            set_stance_label(&self.selected_stance_label());
         }
         #[cfg(not(target_arch = "wasm32"))]
         let _ = carrying_total;
@@ -1800,6 +1801,43 @@ impl App {
         set_sensors_ui(self.sensors_open);
     }
 
+    /// Label for the Stance HUD button: the common stance of the selection,
+    /// `Mixed` when they disagree, `-` when nothing is selected.
+    #[cfg(target_arch = "wasm32")]
+    fn selected_stance_label(&self) -> String {
+        let mut iter = self
+            .selected
+            .iter()
+            .filter_map(|id| self.world.entity(*id).map(|e| e.stance));
+        let Some(first) = iter.next() else {
+            return "Stance: -".to_string();
+        };
+        if iter.all(|s| s == first) {
+            format!("Stance: {}", first.label())
+        } else {
+            "Stance: Mixed".to_string()
+        }
+    }
+
+    /// Cycle every selected ship's stance (Passive -> Defensive -> Aggressive ->
+    /// ...) in lockstep with the first selected ship's current stance. No-op when
+    /// nothing is selected.
+    fn cycle_stance(&mut self) {
+        let Some(&first) = self.selected.first() else {
+            return;
+        };
+        let Some(current) = self.world.entity(first).map(|e| e.stance) else {
+            return;
+        };
+        let next = current.next();
+        for id in self.selected.clone() {
+            self.world.enqueue(Command::SetStance {
+                entity: id,
+                stance: next,
+            });
+        }
+    }
+
     /// Lock the camera onto the focus candidate, or unlock if already locked
     /// onto it (so the button toggles).
     fn toggle_focus(&mut self) {
@@ -1888,6 +1926,11 @@ impl App {
                     self.toggle_sensors();
                 }
             }
+            Key::Character("n") | Key::Character("N") => {
+                if first {
+                    self.cycle_stance();
+                }
+            }
             Key::Named(NamedKey::Escape) => {
                 if first {
                     self.selected.clear();
@@ -1962,6 +2005,7 @@ impl App {
                 UiCmd::TogglePause => self.toggle_pause(),
                 UiCmd::ToggleFocus => self.toggle_focus(),
                 UiCmd::ToggleSensors => self.toggle_sensors(),
+                UiCmd::CycleStance => self.cycle_stance(),
             }
         }
     }
@@ -2569,6 +2613,8 @@ enum UiCmd {
     ToggleFocus,
     /// Toggle the sensors-manager view.
     ToggleSensors,
+    /// Cycle the combat stance of every selected ship (Passive/Defensive/Aggressive).
+    CycleStance,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2597,6 +2643,7 @@ fn wire_dom_controls() {
         ("sol-bo-pause", UiCmd::TogglePause),
         ("sol-focus", UiCmd::ToggleFocus),
         ("sol-sensors", UiCmd::ToggleSensors),
+        ("sol-stance", UiCmd::CycleStance),
     ] {
         if let Some(el) = doc.get_element_by_id(id) {
             let cb = Closure::<dyn FnMut()>::new(move || push_ui(cmd));
@@ -2829,6 +2876,16 @@ fn set_crew(world: &World) {
 fn set_build_status(text: &str) {
     if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
         if let Some(el) = doc.get_element_by_id("sol-build-status") {
+            el.set_text_content(Some(text));
+        }
+    }
+}
+
+/// Update the Stance button's label from the current selection.
+#[cfg(target_arch = "wasm32")]
+fn set_stance_label(text: &str) {
+    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+        if let Some(el) = doc.get_element_by_id("sol-stance") {
             el.set_text_content(Some(text));
         }
     }

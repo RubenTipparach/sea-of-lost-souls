@@ -711,6 +711,7 @@ the target as the order set lands:
 | Select / band-box | LMB click / LMB-drag; mobile tap / hold **Box Select** + drag |
 | Move (context order) | RMB on empty space; mobile tap on empty space |
 | Attack a target | RMB a hostile ship; mobile tap a hostile (with ships selected) |
+| Cycle stance | **`N`** or the **Stance:** HUD button (Passive / Defensive / Aggressive) |
 | Cycle formation | **`C`** or the **Form:** HUD button |
 | Select all (player) | **`Shift+A`** or the **Select All** button |
 | Stop | **`Shift+S`** or the **Stop** button |
@@ -782,7 +783,13 @@ ships carry a **shield** (`max_shield` + recharge after a no-hit delay) that
 absorbs damage before the hull, **modulated by facing** ([§6.8](#68-ballistics--projectiles)):
 a front hit is fully blocked while a rear hit bypasses the shield entirely, so
 flanking matters. Overflow (and all damage to unshielded strike craft) hits the
-**hull**, and a ship at zero hull despawns. (Hull sections and subsystem disable
+**hull**, and a ship at zero hull despawns. Each player ship carries a **combat
+stance** (`Command::SetStance`, cycled with `N` / the **Stance** button):
+**Passive** never auto-engages (only fires on a direct attack order); **Defensive**
+auto-engages hostiles in weapon range, **broadcasts SOS** so nearby allies adopt
+the attacker as their target, and **returns to its anchor** (the last move-order
+point, or the spot where stance was set) when the fight ends; **Aggressive**
+auto-acquires out to sensor range and chases targets down. (Hull sections and subsystem disable
 from [§6.3](#63-structure-hitboxes--positional-damage) are still deferred; facing
 is the first positional step.) Combat VFX read from a deterministic event
 stream the sim emits each step (`World::drain_combat_events`): the renderer

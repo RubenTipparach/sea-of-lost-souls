@@ -69,6 +69,38 @@ pub enum Team {
     Neutral,
 }
 
+/// Combat stance for a ship (player-facing AI toggle).
+/// - `Passive`: never auto-engage; only fire on a direct `Attack` command.
+/// - `Defensive`: auto-engage hostiles in weapon range, respond to nearby allies
+///   under attack (SOS), and return to an anchor position when combat ends.
+/// - `Aggressive`: auto-acquire hostiles out to sensor range and chase them down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stance {
+    Passive,
+    Defensive,
+    Aggressive,
+}
+
+impl Stance {
+    /// Next stance in the Passive -> Defensive -> Aggressive cycle.
+    pub fn next(self) -> Self {
+        match self {
+            Stance::Passive => Stance::Defensive,
+            Stance::Defensive => Stance::Aggressive,
+            Stance::Aggressive => Stance::Passive,
+        }
+    }
+
+    /// Short, stable label for the HUD.
+    pub fn label(self) -> &'static str {
+        match self {
+            Stance::Passive => "Passive",
+            Stance::Defensive => "Defensive",
+            Stance::Aggressive => "Aggressive",
+        }
+    }
+}
+
 /// Ship taxonomy from `design.md` §4. The class identifies which static
 /// blueprint (stats + mesh) an entity uses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -478,6 +510,12 @@ pub struct Entity {
     pub attack_target: Option<EntityId>,
     /// Seconds until this ship's weapon can fire again.
     pub weapon_cooldown: f32,
+    /// Combat stance (player ships only in this build; enemies use the inbound-
+    /// AI block). Drives auto-engagement, SOS response, and anchor return.
+    pub stance: Stance,
+    /// "Home" position the ship returns to after a Defensive engagement ends.
+    /// Set on spawn, on every `MoveTo`, and when stance is set to Defensive.
+    pub anchor: Option<Vec3>,
 }
 
 /// Stable id for an in-flight projectile (incrementing; transient lifetime).
@@ -539,6 +577,9 @@ pub enum Command {
     /// Order a ship to engage a specific target: pursue it to weapon range and
     /// focus fire. Ignored for unarmed classes. Overrides auto-acquisition.
     Attack { entity: EntityId, target: EntityId },
+    /// Set a ship's combat stance (player toggle: Passive/Defensive/Aggressive).
+    /// Switching to Defensive snapshots the current position as the new anchor.
+    SetStance { entity: EntityId, stance: Stance },
     /// Send a resourcer to harvest a node (ignored for ships with no cargo).
     Gather { entity: EntityId, node: NodeId },
     /// Queue a ship of `class` for construction at the mothership; salvage is
@@ -690,6 +731,8 @@ impl World {
             target: None,
             attack_target: None,
             weapon_cooldown: 0.0,
+            stance: Stance::Defensive,
+            anchor: Some(transform.pos),
         });
         id
     }
@@ -754,6 +797,16 @@ impl World {
                         e.patrol = None; // a direct order overrides a patrol
                         e.gather = None; // and cancels any gather task
                         e.attack_target = None; // and breaks off an attack
+                        e.anchor = Some(target); // the new home for Defensive return
+                    }
+                }
+                Command::SetStance { entity, stance } => {
+                    if let Some(e) = self.entity_mut(entity) {
+                        e.stance = stance;
+                        // Defensive returns to where it stood when the order was given.
+                        if stance == Stance::Defensive {
+                            e.anchor = Some(e.transform.pos);
+                        }
                     }
                 }
                 Command::SetVelocity { entity, linear } => {
@@ -893,36 +946,90 @@ impl World {
             }
         }
 
-        // 2c) Attack pursuit: a ship with a commanded `attack_target` steers to a
-        // weapon-range standoff of that target each step (focus fire happens in
-        // the combat pass). Reads pre-move positions; a dead target ends the order.
-        let attack_positions: Vec<(EntityId, Vec3)> = self
+        // 2c) Stance behavior (player team):
+        //   - SOS: an attack on a friendly broadcasts; nearby non-passive armed
+        //     allies adopt the attacker as their `attack_target` (one-step delay
+        //     since this reads last step's combat targets).
+        //   - Pursuit: commanded attacks (any stance) and Aggressive auto-targets
+        //     steer to a weapon-range standoff of their target.
+        //   - Return-to-anchor: Defensive ships with nothing to engage steer
+        //     toward `anchor` so they drift back after a fight ends.
+        const SOS_RADIUS: f32 = 35.0;
+        let positions: Vec<(EntityId, Team, Vec3)> = self
             .entities
             .iter()
-            .map(|e| (e.id, e.transform.pos))
+            .map(|v| (v.id, v.ship.team, v.transform.pos))
             .collect();
-        for e in &mut self.entities {
-            let Some(aid) = e.attack_target else {
+        // Pairs of (attacker, victim, attacker_team) drawn from last step's targets.
+        let attackers: Vec<(EntityId, EntityId, Team)> = self
+            .entities
+            .iter()
+            .filter_map(|a| a.target.map(|tid| (a.id, tid, a.ship.team)))
+            .collect();
+        for (atk_id, vic_id, atk_team) in &attackers {
+            let Some(&(_, vteam, vpos)) = positions.iter().find(|v| v.0 == *vic_id) else {
                 continue;
             };
-            let Some(weapon) = self.registry.get(e.ship.class).weapon else {
-                e.attack_target = None;
+            if vteam == *atk_team || vteam != Team::Player {
                 continue;
-            };
-            match attack_positions.iter().find(|p| p.0 == aid) {
-                Some(&(_, tpos)) => {
-                    let to = e.transform.pos - tpos;
-                    let d = to.length();
-                    e.order = Some(if d > 1e-3 {
-                        tpos + to / d * (weapon.range * 0.7)
-                    } else {
-                        tpos
-                    });
+            }
+            for e in &mut self.entities {
+                if e.ship.team != vteam
+                    || e.id == *vic_id
+                    || e.stance == Stance::Passive
+                    || e.attack_target.is_some()
+                    || e.gather.is_some()
+                    || self.registry.get(e.ship.class).weapon.is_none()
+                {
+                    continue;
                 }
-                None => {
-                    // Target destroyed or gone: break off and hold.
-                    e.attack_target = None;
-                    e.order = None;
+                if (e.transform.pos - vpos).length_squared() <= SOS_RADIUS * SOS_RADIUS {
+                    e.attack_target = Some(*atk_id);
+                }
+            }
+        }
+        for e in &mut self.entities {
+            if e.ship.team != Team::Player {
+                continue;
+            }
+            let weapon_range = self
+                .registry
+                .get(e.ship.class)
+                .weapon
+                .map(|w| w.range)
+                .unwrap_or(0.0);
+            // Pursue a commanded attack target, or (Aggressive only) the current
+            // auto-acquired target.
+            let pursue_id = if e.attack_target.is_some() {
+                e.attack_target
+            } else if e.stance == Stance::Aggressive {
+                e.target
+            } else {
+                None
+            };
+            if let Some(aid) = pursue_id {
+                match positions.iter().find(|p| p.0 == aid) {
+                    Some(&(_, _, tpos)) if weapon_range > 0.0 => {
+                        let to = e.transform.pos - tpos;
+                        let d = to.length();
+                        e.order = Some(if d > 1e-3 {
+                            tpos + to / d * (weapon_range * 0.7)
+                        } else {
+                            tpos
+                        });
+                    }
+                    Some(_) => {} // unarmed somehow: nothing to do
+                    None => {
+                        e.attack_target = None;
+                        e.order = None;
+                    }
+                }
+                continue;
+            }
+            // Defensive: nothing to engage, so drift back to the anchor.
+            if e.stance == Stance::Defensive && e.gather.is_none() && e.target.is_none() {
+                if let Some(a) = e.anchor {
+                    e.order = Some(a);
                 }
             }
         }
@@ -1062,11 +1169,20 @@ impl World {
             let team = e.ship.team;
             let my_id = e.id;
             let my_pos = e.transform.pos;
-            let max_d2 = weapon.range * weapon.range;
+            let weapon_d2 = weapon.range * weapon.range;
+            // Auto-acquisition range depends on stance: Passive skips it entirely,
+            // Defensive only looks inside weapon range, Aggressive reaches out to
+            // sensor range so it can pick targets to chase down. Firing itself
+            // (below) is always gated by the actual weapon range.
+            let acquire_d2 = match e.stance {
+                Stance::Passive => 0.0,
+                Stance::Defensive => weapon_d2,
+                Stance::Aggressive => bp.sensor_range * bp.sensor_range,
+            };
             // Target priority: a commanded attack target (at any range, so the
             // ship can pursue and lock) wins; else keep the current auto-target if
-            // still in range; else acquire the nearest hostile (stable id order
-            // breaks ties). A vanished commanded target clears the attack order.
+            // still in acquire range; else acquire the nearest hostile (stable id
+            // order breaks ties). A vanished commanded target clears the attack.
             let mut target: Option<(EntityId, Vec3, Vec3)> = None;
             if let Some(aid) = e.attack_target {
                 match combatants.iter().find(|c| c.0 == aid && c.1 != team) {
@@ -1079,19 +1195,21 @@ impl World {
                     combatants
                         .iter()
                         .find(|c| {
-                            c.0 == id && c.1 != team && (c.2 - my_pos).length_squared() <= max_d2
+                            c.0 == id
+                                && c.1 != team
+                                && (c.2 - my_pos).length_squared() <= acquire_d2
                         })
                         .map(|c| (c.0, c.2, c.3))
                 });
             }
-            if target.is_none() {
+            if target.is_none() && acquire_d2 > 0.0 {
                 let mut best_d2 = f32::INFINITY;
                 for &(id, t, pos, vel, _r) in &combatants {
                     if t == team || id == my_id {
                         continue;
                     }
                     let d2 = (pos - my_pos).length_squared();
-                    if d2 <= max_d2 && d2 < best_d2 {
+                    if d2 <= acquire_d2 && d2 < best_d2 {
                         best_d2 = d2;
                         target = Some((id, pos, vel));
                     }
@@ -1101,7 +1219,7 @@ impl World {
             // Fire only when the target is within weapon range (a commanded target
             // may still be out of range while the ship closes).
             let in_range =
-                target.is_some_and(|(_, tpos, _)| (tpos - my_pos).length_squared() <= max_d2);
+                target.is_some_and(|(_, tpos, _)| (tpos - my_pos).length_squared() <= weapon_d2);
             if let (true, true, Some((tid, tpos, tvel))) =
                 (e.weapon_cooldown <= 0.0, in_range, target)
             {
@@ -1324,6 +1442,15 @@ impl World {
             }
             h = fnv1a(h, e.hull.to_bits());
             h = fnv1a(h, e.shield.to_bits());
+            h = fnv1a(h, e.stance as u32);
+            let (ax, ay, az, ap) = match e.anchor {
+                Some(a) => (a.x, a.y, a.z, 1u32),
+                None => (0.0, 0.0, 0.0, 0u32),
+            };
+            h = fnv1a(h, ap);
+            h = fnv1a(h, ax.to_bits());
+            h = fnv1a(h, ay.to_bits());
+            h = fnv1a(h, az.to_bits());
             h = fnv1a(h, e.gather.map(|g| g.carrying).unwrap_or(0.0).to_bits());
         }
         h = fnv1a(h, self.salvage.to_bits());
@@ -1770,6 +1897,84 @@ mod tests {
         assert!(
             w.entity(a).is_some(),
             "the corvette should survive the fighter"
+        );
+    }
+
+    #[test]
+    fn passive_does_not_auto_engage() {
+        let mut w = World::new(31);
+        let p = w.spawn_class(ShipClass::Corvette, Team::Player, Vec3::ZERO);
+        w.enqueue(Command::SetStance {
+            entity: p,
+            stance: Stance::Passive,
+        });
+        let e = w.spawn_class(ShipClass::Fighter, Team::Enemy, Vec3::new(15.0, 0.0, 0.0));
+        let enemy_hull_start = w.entity(e).unwrap().hull;
+        for _ in 0..(TICK_HZ * 3) {
+            w.step(TICK_DT);
+        }
+        // The passive corvette should never have acquired the enemy or fired.
+        assert_eq!(w.entity(p).unwrap().target, None);
+        let enemy_hull = w.entity(e).map(|x| x.hull).unwrap_or(0.0);
+        assert!(
+            enemy_hull >= enemy_hull_start - 1e-3,
+            "passive ship should not damage the enemy: {enemy_hull} vs {enemy_hull_start}",
+        );
+    }
+
+    #[test]
+    fn sos_rallies_nearby_allies() {
+        let mut w = World::new(33);
+        let a = w.spawn_class(ShipClass::Corvette, Team::Player, Vec3::ZERO);
+        w.spawn_class(ShipClass::Corvette, Team::Player, Vec3::new(5.0, 0.0, 0.0));
+        let enemy = w.spawn_class(ShipClass::Fighter, Team::Enemy, Vec3::new(12.0, 0.0, 0.0));
+        // Two steps: one for the enemy to acquire the closer corvette, one for SOS
+        // to wake the further one with an attack_target.
+        for _ in 0..6 {
+            w.step(TICK_DT);
+        }
+        assert_eq!(
+            w.entity(a).unwrap().attack_target,
+            Some(enemy),
+            "SOS should rally the ally to the attacker"
+        );
+    }
+
+    #[test]
+    fn defensive_returns_to_anchor() {
+        let mut w = World::new(35);
+        let id = w.spawn_class(ShipClass::Corvette, Team::Player, Vec3::ZERO);
+        // Displace it; anchor (origin) was set at spawn time. With no hostile in
+        // range, the Defensive anchor-return order should drift it back.
+        w.entities[0].transform.pos = Vec3::new(20.0, 0.0, 0.0);
+        for _ in 0..(TICK_HZ * 5) {
+            w.step(TICK_DT);
+        }
+        let end = w.entity(id).unwrap().transform.pos.length();
+        assert!(end < 3.0, "should drift back toward anchor: {end}");
+    }
+
+    #[test]
+    fn aggressive_pursues_out_of_weapon_range_hostile() {
+        let mut w = World::new(37);
+        let p = w.spawn_class(ShipClass::Corvette, Team::Player, Vec3::ZERO);
+        w.enqueue(Command::SetStance {
+            entity: p,
+            stance: Stance::Aggressive,
+        });
+        // Fighter at 35: beyond the corvette's 26 weapon range but inside its
+        // 40 sensor range, so aggressive auto-acquisition picks it up and pursues.
+        let e = w.spawn_class(ShipClass::Fighter, Team::Enemy, Vec3::new(35.0, 0.0, 0.0));
+        let start_pos = w.entity(p).unwrap().transform.pos;
+        for _ in 0..(TICK_HZ * 4) {
+            w.step(TICK_DT);
+        }
+        let moved =
+            (w.entity(p).map(|x| x.transform.pos).unwrap_or(start_pos) - start_pos).length();
+        let killed = w.entity(e).is_none();
+        assert!(
+            moved > 2.0 || killed,
+            "aggressive should close on (or destroy) an out-of-range hostile: moved {moved}, killed {killed}",
         );
     }
 
