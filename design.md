@@ -784,10 +784,12 @@ a front hit is fully blocked while a rear hit bypasses the shield entirely, so
 flanking matters. Overflow (and all damage to unshielded strike craft) hits the
 **hull**, and a ship at zero hull despawns. (Hull sections and subsystem disable
 from [§6.3](#63-structure-hitboxes--positional-damage) are still deferred; facing
-is the first positional step.) The renderer draws projectile tracers + glints and
-an expanding burst when a ship dies (both purely visual, read from sim state);
-health bars now appear over any damaged ship (blue shield over red hull), not
-just selected ones.
+is the first positional step.) Combat VFX read from a deterministic event
+stream the sim emits each step (`World::drain_combat_events`): the renderer
+turns those into **muzzle flashes** on fire, an orange spark on a hull hit, a
+**blue expanding shield ripple** on a shield hit, projectile tracers + glints in
+flight, and an expanding burst when a ship dies. Health bars now appear over any
+damaged ship (blue shield over red hull), not just selected ones.
 
 Because `WASD` pans here, the target table's `W/S/D` order keys (waypoint / stop /
 dock) are not yet bound; `Stop` and `Select All` move to `Shift+S` / `Shift+A`

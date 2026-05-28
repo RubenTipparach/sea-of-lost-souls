@@ -15,7 +15,7 @@ use sol_render::{
 };
 #[cfg(target_arch = "wasm32")]
 use sol_sim::CrewKind;
-use sol_sim::{Command, EntityId, Patrol, ShipClass, Team, WeaponKind, World};
+use sol_sim::{CombatEvent, Command, EntityId, Patrol, ShipClass, Team, WeaponKind, World};
 
 /// Group-move arrangement applied by [`App::issue_move`]. Local UI state only
 /// (never enters the sim): it just maps a click to per-ship slot targets.
@@ -84,6 +84,33 @@ struct Explosion {
     start: f32,
     /// Burst size, scaled from the destroyed ship's class.
     scale: f32,
+}
+
+/// Transient weapon/impact VFX (a muzzle flash, an orange hull-hit spark, or a
+/// blue shield-ripple). Spawned from `CombatEvent`s drained out of the sim.
+#[derive(Clone, Copy)]
+enum SparkKind {
+    Muzzle,
+    HitHull,
+    HitShield,
+}
+
+#[derive(Clone, Copy)]
+struct Spark {
+    pos: Vec3,
+    /// Muzzle aim direction (zero for impacts).
+    dir: Vec3,
+    start: f32,
+    kind: SparkKind,
+    color: [f32; 3],
+}
+
+fn spark_duration(kind: SparkKind) -> f32 {
+    match kind {
+        SparkKind::Muzzle => 0.10,
+        SparkKind::HitHull => 0.22,
+        SparkKind::HitShield => 0.28,
+    }
 }
 
 /// Build-overlay turntable: default pitch, auto-spin rate (rad/s), and the idle
@@ -252,6 +279,8 @@ struct App {
     elapsed: f32,
     /// Active ship-death explosions (visual only; emitted into the particle pass).
     explosions: Vec<Explosion>,
+    /// Active muzzle / impact sparks drained from the sim's combat-event stream.
+    sparks: Vec<Spark>,
     /// Last frame's entity positions/classes, used to detect deaths (an id that
     /// vanished) and spawn an explosion at its last position. Render-only.
     tracked: HashMap<EntityId, (Vec3, ShipClass)>,
@@ -329,6 +358,7 @@ impl App {
             accumulator: 0.0,
             elapsed: 0.0,
             explosions: Vec::new(),
+            sparks: Vec::new(),
             tracked: HashMap::new(),
             selected: Vec::new(),
             formation: Formation::Parade,
@@ -477,6 +507,36 @@ impl App {
                 self.world.step(dt);
                 self.accumulator -= dt;
                 steps += 1;
+                // Drain this step's combat effects into VFX sparks; the renderer
+                // emits them as additive particles + shield-ripple rings below.
+                let start = self.elapsed;
+                for ev in self.world.drain_combat_events() {
+                    let spark = match ev {
+                        CombatEvent::Fired { pos, dir, kind } => Spark {
+                            pos,
+                            dir,
+                            start,
+                            kind: SparkKind::Muzzle,
+                            color: projectile_style(kind).0,
+                        },
+                        CombatEvent::Hit { pos, shielded } => Spark {
+                            pos,
+                            dir: Vec3::ZERO,
+                            start,
+                            kind: if shielded {
+                                SparkKind::HitShield
+                            } else {
+                                SparkKind::HitHull
+                            },
+                            color: if shielded {
+                                [0.4, 0.78, 1.0]
+                            } else {
+                                [1.0, 0.6, 0.25]
+                            },
+                        },
+                    };
+                    self.sparks.push(spark);
+                }
             }
         } else {
             // Paused: orders still take effect immediately (active pause) so the
@@ -856,6 +916,68 @@ impl App {
                     [c, c * 0.55, c * 0.22],
                     0.006 + 0.02 * fade,
                 ));
+            }
+        }
+
+        // Muzzle flashes + impact sparks (drained from the sim each step). Each is
+        // a brief additive burst; shield hits also get a blue expanding ring.
+        self.sparks
+            .retain(|s| elapsed - s.start < spark_duration(s.kind));
+        for s in &self.sparks {
+            let dur = spark_duration(s.kind);
+            let age = (elapsed - s.start).max(0.0);
+            let t = (age / dur).clamp(0.0, 1.0);
+            let fade = 1.0 - t;
+            let c0 = s.color;
+            match s.kind {
+                SparkKind::Muzzle => {
+                    for k in 0..6u32 {
+                        let kk = k as f32;
+                        let a1 = kk * 2.399_963 + s.start * 9.0;
+                        let a2 = kk * 1.13 + s.start * 4.0;
+                        let lateral = Vec3::new(a1.cos(), a2.cos() * 0.5, a1.sin()) * 0.18;
+                        let p = s.pos + s.dir * (0.2 + 1.4 * t) + lateral;
+                        let f = fade * 0.9;
+                        particles.push(StarInstance::new(
+                            p.to_array(),
+                            [c0[0] * f, c0[1] * f, c0[2] * f],
+                            0.01 + 0.015 * fade,
+                        ));
+                    }
+                }
+                SparkKind::HitHull => {
+                    for k in 0..10u32 {
+                        let kk = k as f32;
+                        let a1 = kk * 2.399_963 + s.start * 11.0;
+                        let a2 = kk * 1.7 + s.start * 5.0;
+                        let dir = Vec3::new(a1.cos() * a2.sin(), a2.cos(), a1.sin() * a2.sin());
+                        let p = s.pos + dir * (0.4 + 2.0 * t);
+                        let f = fade * 0.95;
+                        particles.push(StarInstance::new(
+                            p.to_array(),
+                            [c0[0] * f, c0[1] * f, c0[2] * f],
+                            0.008 + 0.018 * fade,
+                        ));
+                    }
+                }
+                SparkKind::HitShield => {
+                    // Expanding ring on the XZ plane through the impact, plus a
+                    // few additive motes. Reads as a shield ripple.
+                    let radius = 0.5 + 2.4 * t;
+                    let ring = [c0[0] * fade, c0[1] * fade, c0[2] * fade];
+                    push_circle(&mut gizmo_lines, s.pos, radius, ring, 22);
+                    for k in 0..6u32 {
+                        let kk = k as f32;
+                        let a = kk * std::f32::consts::FRAC_PI_3 + s.start * 6.0;
+                        let p = s.pos + Vec3::new(a.cos(), 0.0, a.sin()) * radius;
+                        let f = fade * 0.85;
+                        particles.push(StarInstance::new(
+                            p.to_array(),
+                            [c0[0] * f, c0[1] * f, c0[2] * f],
+                            0.008 + 0.012 * fade,
+                        ));
+                    }
+                }
             }
         }
 

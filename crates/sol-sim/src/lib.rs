@@ -507,6 +507,23 @@ pub struct Projectile {
     pub life: f32,
 }
 
+/// A transient combat effect produced during a step, for the renderer to turn
+/// into particles/flashes. Output only: deterministic (every peer computes the
+/// same stream), never read back into the sim, and not part of the checksum.
+/// Drained each frame via [`World::drain_combat_events`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CombatEvent {
+    /// A weapon fired: muzzle position, aim direction, and the weapon kind.
+    Fired {
+        pos: Vec3,
+        dir: Vec3,
+        kind: WeaponKind,
+    },
+    /// A projectile struck a ship at `pos`; `shielded` is true when the shield
+    /// absorbed any of the hit (a blue ripple) vs. a bare hull hit (orange).
+    Hit { pos: Vec3, shielded: bool },
+}
+
 /// A player/AI order. Orders are queued and applied at fixed-step boundaries
 /// (the lockstep seam), never as direct mutations from input. Steering for
 /// `MoveTo` lands in Stage 7; for now movement is expressed as a target
@@ -539,6 +556,9 @@ pub struct World {
     pub entities: Vec<Entity>,
     /// In-flight projectiles (transient combat entities; `design.md` §6.8).
     pub projectiles: Vec<Projectile>,
+    /// Transient combat effects from the last step, drained by the renderer.
+    /// Output only; cleared at the start of every [`World::step`].
+    pub combat_events: Vec<CombatEvent>,
     /// Harvestable salvage sites (asteroids); drained by resourcers.
     pub resource_nodes: Vec<ResourceNode>,
     /// Salvage banked at the mothership (the player's resource pool).
@@ -562,6 +582,7 @@ impl World {
         Self {
             entities: Vec::new(),
             projectiles: Vec::new(),
+            combat_events: Vec::new(),
             resource_nodes: Vec::new(),
             salvage: 0.0,
             build_queue: Vec::new(),
@@ -703,6 +724,12 @@ impl World {
         self.pending.push(command);
     }
 
+    /// Take this step's combat effects (muzzle flashes, impacts), clearing the
+    /// buffer. The renderer calls this after each step to spawn VFX.
+    pub fn drain_combat_events(&mut self) -> Vec<CombatEvent> {
+        std::mem::take(&mut self.combat_events)
+    }
+
     /// Look up an entity by id (linear scan; entity counts are small in
     /// Phase 1).
     pub fn entity(&self, id: EntityId) -> Option<&Entity> {
@@ -795,6 +822,8 @@ impl World {
     pub fn step(&mut self, dt: f32) {
         // 1) Apply queued orders at this step boundary, in arrival order.
         self.apply_commands();
+        // This step's transient combat effects accumulate here; clear last step's.
+        self.combat_events.clear();
 
         // 2) Snapshot positions+radii BEFORE moving anyone, so separation is
         // order independent (ship A's move can't change ship B's input this step).
@@ -1021,9 +1050,11 @@ impl World {
 
         // Firing pass: tick cooldowns, (re)acquire targets, emit new projectiles.
         let mut new_projectiles: Vec<Projectile> = Vec::new();
+        let mut events: Vec<CombatEvent> = Vec::new();
         let mut next_pid = self.next_projectile_id;
         for e in &mut self.entities {
-            let Some(weapon) = self.registry.get(e.ship.class).weapon else {
+            let bp = self.registry.get(e.ship.class);
+            let Some(weapon) = bp.weapon else {
                 e.target = None;
                 continue;
             };
@@ -1096,6 +1127,11 @@ impl World {
                     });
                     next_pid += 1;
                     e.weapon_cooldown = weapon.cooldown;
+                    events.push(CombatEvent::Fired {
+                        pos: my_pos + dir * bp.radius,
+                        dir,
+                        kind: weapon.kind,
+                    });
                 }
             }
         }
@@ -1104,9 +1140,10 @@ impl World {
         // Projectile pass: home (missiles), integrate, swept hit-test against
         // hostile ships, then apply damage. Newly fired shots are appended after,
         // so they wait one step before moving (no instant-hit at the muzzle).
-        // Each hit records (target, damage, direction the shot came from) so the
-        // facing-modulated shield model can be applied in order below.
-        let mut damage: Vec<(EntityId, f32, Vec3)> = Vec::new();
+        // Each hit records (target, damage, direction the shot came from, impact
+        // point) so the facing-modulated shield model can be applied in order, and
+        // an impact effect emitted, below.
+        let mut damage: Vec<(EntityId, f32, Vec3, Vec3)> = Vec::new();
         let mut surviving: Vec<Projectile> = Vec::with_capacity(self.projectiles.len());
         for mut p in std::mem::take(&mut self.projectiles) {
             p.prev_pos = p.pos;
@@ -1141,18 +1178,25 @@ impl World {
                 }
             }
             if let Some(id) = best_id {
-                damage.push((id, p.damage, (-p.vel).normalize_or_zero()));
+                let impact = a.lerp(b, best_t);
+                damage.push((id, p.damage, (-p.vel).normalize_or_zero(), impact));
             } else if p.life > 0.0 {
                 surviving.push(p);
             }
         }
         self.projectiles = surviving;
         // Apply hits in order: the shield absorbs first (strongest on the front,
-        // weakest on the rear), the rest hits the hull; any hit pauses regen.
-        for (id, dmg, hit_from) in damage {
+        // weakest on the rear), the rest hits the hull; any hit pauses regen and
+        // emits an impact effect (blue if the shield absorbed any, else orange).
+        for (id, dmg, hit_from, impact) in damage {
             if let Some(e) = self.entity_mut(id) {
                 let facing = hit_from.dot(e.transform.rot * Vec3::Z);
                 let (shield, hull) = apply_hit(e.shield, e.hull, dmg, facing);
+                let shielded = shield < e.shield;
+                events.push(CombatEvent::Hit {
+                    pos: impact,
+                    shielded,
+                });
                 e.shield = shield;
                 e.hull = hull;
                 e.shield_regen_cooldown = SHIELD_REGEN_DELAY;
@@ -1161,6 +1205,7 @@ impl World {
         // Despawn destroyed ships; `retain` keeps the survivors in spawn order.
         self.entities.retain(|e| e.hull > 0.0);
         self.projectiles.append(&mut new_projectiles);
+        self.combat_events.append(&mut events);
 
         // Shield recharge: after the post-hit delay elapses, shields regenerate
         // toward `max_shield`. Stable order; runs for every shielded survivor.
@@ -1726,6 +1771,26 @@ mod tests {
             w.entity(a).is_some(),
             "the corvette should survive the fighter"
         );
+    }
+
+    #[test]
+    fn combat_emits_fire_and_hit_events() {
+        let mut w = World::new(21);
+        w.spawn_class(ShipClass::Corvette, Team::Player, Vec3::ZERO);
+        w.spawn_class(ShipClass::Fighter, Team::Enemy, Vec3::new(12.0, 0.0, 0.0));
+        let mut saw_fired = false;
+        let mut saw_hit = false;
+        for _ in 0..(TICK_HZ * 5) {
+            w.step(TICK_DT);
+            for ev in w.drain_combat_events() {
+                match ev {
+                    CombatEvent::Fired { .. } => saw_fired = true,
+                    CombatEvent::Hit { .. } => saw_hit = true,
+                }
+            }
+        }
+        assert!(saw_fired, "a weapon should have fired");
+        assert!(saw_hit, "a projectile should have struck a ship");
     }
 
     #[test]
