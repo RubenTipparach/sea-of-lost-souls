@@ -2250,6 +2250,8 @@ fn projectile_style(kind: WeaponKind) -> ([f32; 3], f32) {
         WeaponKind::Ballistic => ([1.0, 0.92, 0.55], 0.006),
         WeaponKind::Bomb => ([1.0, 0.55, 0.2], 0.013),
         WeaponKind::Missile => ([1.0, 0.66, 0.3], 0.01),
+        // Disabler: cyan beam tracer so the player can see the salvager work.
+        WeaponKind::Disabler => ([0.45, 0.85, 1.0], 0.008),
     }
 }
 

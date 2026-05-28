@@ -262,48 +262,80 @@ production can't over-commit the roster.
 ### Capturing a ship (the Salvager loop)
 
 **Salvagers are the keystone class** of the game's economy. They are unarmed
-utility hulls unlocked right after Corvettes, slow but tough, equipped with a
-**disabler beam** (drops shields and suppresses engines/weapons without doing
-hull damage) and a **grapple/tow rig**. The player uses salvagers to capture
-enemy ships *before* the rest of the fleet kills them, turning combat into a
-resource-extraction exercise.
+utility hulls unlocked right after Corvettes: slow, tough, fitted with a
+**disabler beam** that drops the target's hull to a non-lethal floor without
+killing it, and a **grapple/tow rig** that drags the disabled hull back to the
+Ark. The player uses salvagers to capture enemy ships *before* the rest of the
+fleet kills them, turning combat into a resource-extraction exercise.
 
 ```mermaid
 flowchart TD
-    A[Target enemy ship] --> B[Soften it: drop shields, suppress weapons]
-    B --> C[Salvager moves in, fires disabler beam]
-    C --> D[Disabler depletes the target's engines + weapons + crew]
+    A[Target enemy ship] --> B[Combat ships soften it<br/>hull falls below the disabler's effective threshold]
+    B --> C[Salvager fires the disabler beam<br/>damage ramps inverse to target hull %]
+    C --> D[Hull clamped to a non-lethal floor; ship is **Disabled**:<br/>no movement, no firing, ignored by combat AI]
     D --> E[Salvager grapples and tows the dead hull back to the Ark]
-    E --> F{Player chooses}
-    F -->|Keep| G[Acclimate + crew it: enters your fleet at reduced capability]
-    F -->|Liquidate| H[Strip for research points spent in the tech tree]
+    E --> F[On arrival, hull enters the **Pending decisions** queue]
+    F --> G{Player chooses, per hull}
+    G -->|Keep| H[Allocate crew; if alien tech, requires faction proficiency]
+    G -->|Liquidate| I[Strip for research points in the tech tree]
 ```
 
-The salvager itself is **unarmed and fragile under fire**: it needs the rest of
-the fleet to suppress threats while it does its work. A salvager dying with a
-half-towed hull loses both. This pressure is what turns every encounter into a
-small tactical puzzle: which enemy ships are worth the salvage risk, and which
-do you just kill?
+**Disabler beam (mechanic).** The disabler does scaling hull damage that ramps
+**inversely** with the target's current hull fraction. A full-hull ship barely
+feels it; a wounded ship comes apart. Concretely: at 100% hull the disabler
+applies a small fraction of base damage, at 50% it does base damage, at 0% it
+does near-double. **Hull is clamped to a 5% floor** when struck by a disabler,
+and the target is flagged **Disabled** the moment it hits the floor. The
+gameplay loop: hit it with combat ships first, *then* swap to salvagers for the
+finisher. The disabler itself cannot kill, but other ships can - so the player
+must back off their own combat fire once the salvager moves in.
 
-Once an enemy hull is towed home, the player makes the **keep-or-liquidate**
-decision per ship:
+**Disabled state.** A disabled ship has:
+- `max_speed` and `accel` forced to zero (it drifts only on residual momentum
+  + separation).
+- No weapon firing (skipped in the combat pass).
+- Skipped by auto-targeting and SOS rallies; commander wave-conscription
+  ignores it. (Player-commanded fire still works, if they want to scuttle a
+  capture.)
+- No flee, no retaliate.
+- Eligible for tow by any friendly salvager.
 
-- **Keep.** The hull enters your fleet but is **unfamiliar**: unknown
-  subsystems locked or running at reduced efficiency; exotic weapons may be
-  unusable until understood. Assigned crew **acclimate** over time aboard, and
-  through targeted **research**. With enough proficiency + the right branch
-  unlocked, the ship reaches full potential, sometimes exceeding anything you
-  could build.
-- **Liquidate.** The hull is broken down into **research points** at the Ark.
-  Bigger and rarer hulls yield more points: roughly a frigate is worth more
-  than a corvette is worth more than a fighter, with alien tech multipliers on
-  top. Research points are then spent in the tech tree to unlock **advanced
-  frigates and capital ships**, doctrines, and Ark modules.
+**Tow.** Once a salvager reaches a disabled hull, it grapples and pulls the
+hull back to the Ark at half its own max speed. The tow can be broken (the
+salvager dying mid-tow drops the hull where it is). Multiple salvagers can
+work the battlefield in parallel, but a hull can only be towed by one at a
+time.
+
+**Pending decisions queue.** On contact with the Ark the towed hull leaves the
+battle and joins a **Pending decisions** queue. The HUD shows `N awaiting
+decision`; clicking the badge opens the queue panel where the player commits
+**Keep** or **Liquidate** per hull. The decision can be deferred between
+missions; pending hulls survive across encounters until resolved.
+
+**Keep vs Liquidate (the core economy).**
+
+- **Keep.** Allocate crew from the carrier's pool (the hull won't operate
+  without it). The ship enters the fleet at reduced capability: unknown
+  subsystems locked, exotic weapons unusable until understood. Crew aboard
+  **acclimate** over time, raising **proficiency** (capped by what's unlocked
+  in the research tree). A captured **alien** hull cannot be crewed at all
+  until the player has researched the matching **xenotech doctrine** for that
+  faction; a freshly captured alien ship therefore sits in the queue as
+  *keep-locked* until that branch is bought. **Crew aboard captured alien
+  ships also drip alien research points slowly over time** as they figure the
+  systems out hands-on, but at a much lower rate than liquidating.
+- **Liquidate.** Strip the hull for **research points** at the Ark. Bigger
+  and rarer hulls yield more points: a frigate is worth more than a corvette
+  is worth more than a fighter, with **alien-tech multipliers** on top.
+  Liquidating an alien hull pays into both the **general** research pool and
+  the **alien-faction proficiency** branch. Liquidation is the fast lane to
+  unlocking xenotech doctrines.
 
 > Design tension: the best captures are also the best to keep. Liquidating is
-> a *concession* (you couldn't field this hull anyway, or you need the tier
-> unlock more than the asset). The player constantly trades off "field it now"
-> vs "unlock something better later."
+> a *concession* (you couldn't crew this hull yet, or you need the tier
+> unlock more than the asset). Until you've unlocked alien doctrines, every
+> alien capture is a **forced liquidation** - which is exactly how you fund
+> the first doctrine in the first place.
 
 ### Research tree (branches)
 
@@ -323,6 +355,60 @@ Research spans **within-run** (Intel unlocks tactical capability this run) and
 > Design rule: meta-progression unlocks **knowledge and access**, not flat
 > stat inflation. The fun is "now I can crew a Vaered dreadnought," not "+10%
 > damage."
+
+### Alien factions: the Vaered (first fast follower)
+
+The first alien faction to land after the capture loop ships is the
+**Vaered**, an ion-tech civilization that survived in the deep currents of
+the Sea long before the player's people arrived. They are the design proving
+ground for the **xenotech proficiency** mechanic: their ships are obviously
+foreign on first contact, and capturing one is a milestone moment.
+
+**Theme & aesthetic.** Crystalline angular hulls, cyan/blue energy bloom,
+slow languid maneuvers, exterior antennae instead of visible weapons. Their
+livery uses pale lattice patterns; impacts on Vaered shields shed prismatic
+spray. They feel **older** than the player's fleet, not newer.
+
+**Doctrine.** Ion + electromagnetic. Vaered weapons **shred shields** far
+faster than they damage hull, and their own ships carry **regenerating ion
+shields** that brush off incoming kinetic fire but melt under sustained
+human ballistics once the shield is down. Players who learn to fight Vaered
+quickly figure out: drop the shield fast (mass fire) or never (skim past
+them).
+
+**Ship classes (initial roster, fast follower).**
+
+| Class | Role | Signature trait |
+|---|---|---|
+| **Vaered Skiff** | strike craft | small ion lance; very fast, paper hull |
+| **Vaered Lance** | corvette-equivalent | focused ion lance that can drop a player frigate's shield in one volley |
+| **Vaered Ion Frigate** | long-range artillery | the existing example ship; standoff ion bolts |
+| **Vaered Carrier** | mothership | crystalline core; the mission boss when Vaered show up |
+
+A first Vaered encounter is balanced as a **research-points farm**: the
+player can't crew their hulls yet, so every capture is a forced liquidation
+into the **Vaered Doctrine** branch. After unlocking Doctrine I, captured
+Vaered ships become *crewable* with a low proficiency cap; later Doctrine
+tiers raise the cap and unlock ion weapons + ion shields on human hulls
+through **cross-tech retrofit** research.
+
+**Proficiency (the new dimension on crew).** Each crew member carries a
+proficiency rating per faction-tech they've worked with: `Human` baseline
+plus `Vaered`, and (later factions) `Sho`, `Kethari`, etc. A human crew
+freshly assigned to a Vaered hull starts at floor proficiency. **They gain
+proficiency over time aboard**, asymptotically approaching the cap allowed
+by the player's current Vaered Doctrine tier. Higher proficiency unlocks
+more of the ship's subsystems and reduces the unfamiliarity penalty on its
+stats. A side-effect of crew working an alien hull: a slow **research-point
+drip** into that faction's proficiency branch, so keeping captures
+contributes (slowly) to unlocking the rest of the tree.
+
+**Why this is the fast follower.** The capture loop ships first; the moment
+it works, the Vaered enter the encounter pool so the keep-or-liquidate
+decision actually has stakes. Until then, every capture is a generic human
+hull and the decision is purely "do I want this ship or research points?"
+The Vaered add the third axis (and the alien-doctrine gate) that makes the
+loop a real game.
 
 ### Mission-driven progression: from basics to specialized fleet
 
@@ -1621,8 +1707,14 @@ complete.
 | **MU / Matter Units** | The in-run resource currency, mined from asteroid fields by harvesters and spent on builds at the Ark. |
 | **Research points** | Meta-progression currency. Awarded by missions (main + bonus objectives) **and by liquidating captured ships**; spent between runs in the research tree. |
 | **Mission** | A single tactical encounter with a **main objective** (default: destroy enemy mothership) and an optional **bonus objective** that pays extra research points. |
-| **Salvager** | Unarmed utility hull unlocked at tier 1, after Corvettes. Disables and tows enemy ships back to the Ark for the **keep-or-liquidate** decision. The star class of the game's economy. |
-| **Liquidation** | Stripping a captured enemy hull at the Ark to convert it into research points (vs keeping it, acclimating crew, and adding it to the fleet). |
+| **Salvager** | Lightly armored utility hull unlocked at tier 1, after Corvettes. Disables and tows enemy ships back to the Ark for the **keep-or-liquidate** decision. The star class of the game's economy. |
+| **Disabler beam** | Salvager's primary weapon. Damage ramps **inversely** with the target's hull fraction (weak on full hulls, strong on wounded ones). Cannot kill: clamps target hull to a 5% floor and flags the ship **Disabled**. |
+| **Disabled** | Special ship state: zero movement, no firing, ignored by auto-target / SOS / wave conscription. Eligible for tow. |
+| **Tow** | A salvager grappling a Disabled hull and pulling it home at half its own max speed. |
+| **Pending decisions** | Per-Ark queue of towed captures awaiting Keep or Liquidate. Survives across encounters until resolved. |
+| **Liquidation** | Stripping a captured hull at the Ark to convert it into research points. Alien hulls pay into both the general pool and the faction's xenotech-doctrine branch. |
+| **Proficiency** | Per-faction-tech crew rating (`Human`, `Vaered`, ...). Determines how much of a captured hull's potential its crew can unlock. Rises asymptotically with time aboard, capped by the relevant Doctrine tier. |
+| **Vaered** | The first alien faction (fast follower to the capture loop). Crystalline, ion-based; their hulls shred shields fast and tank kinetics until their own ion shield drops. The first xenotech doctrine branch. |
 | **Move-disk** | Homeworld-style 3D move tool: set X/Z on a plane, drag vertically for altitude. |
 | **Sensors view** | Far-zoom abstracted tactical representation of the battlespace. |
 | **Lockstep** | Multiplayer model where all peers deterministically simulate the same state from shared commands. |

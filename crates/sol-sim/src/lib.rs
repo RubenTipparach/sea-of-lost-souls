@@ -170,6 +170,11 @@ pub enum WeaponKind {
     Ballistic,
     Bomb,
     Missile,
+    /// Salvager's tool. Damage ramps **inversely** with the target's hull
+    /// fraction (weak on full hulls, strong on wounded ones); on hit it clamps
+    /// the target's hull to `DISABLER_HULL_FLOOR` and flags the ship Disabled
+    /// instead of allowing a kill.
+    Disabler,
 }
 
 /// A ship's weapon mount (one per armed class in this prototype; per-hardpoint
@@ -210,9 +215,10 @@ fn weapon_for(class: ShipClass) -> Option<Weapon> {
         ShipClass::Fighter => w(WeaponKind::Ballistic, 22.0, 6.0, 90.0, 0.18, 0.0, 0.4),
         ShipClass::Bomber => w(WeaponKind::Bomb, 16.0, 60.0, 45.0, 2.2, 0.0, 1.0),
         ShipClass::Corvette => w(WeaponKind::Ballistic, 26.0, 10.0, 85.0, 0.5, 0.0, 0.5),
-        // Salvager is unarmed in code today; the disabler beam + tow rig
-        // (design.md section 5) will land with the capture mechanic.
-        ShipClass::Salvager => None,
+        // Disabler beam: short-medium range, fast tracer, low base damage that
+        // ramps inversely with the target's hull fraction. See the apply pass
+        // for the scaling + 5% hull floor + Disabled flagging.
+        ShipClass::Salvager => w(WeaponKind::Disabler, 22.0, 5.0, 80.0, 0.5, 0.0, 0.4),
         ShipClass::Resourcer => None,
         ShipClass::FrigateGeneral => w(WeaponKind::Ballistic, 38.0, 18.0, 80.0, 0.9, 0.0, 0.6),
         ShipClass::FrigateMissile => w(WeaponKind::Missile, 55.0, 45.0, 38.0, 2.6, 70.0, 0.8),
@@ -266,9 +272,22 @@ pub const ENEMY_FORCE_CAP: usize = 14;
 /// Hull fraction below which a combat ship breaks off and retreats to its
 /// mothership. Shields recharge there but hull does not.
 pub const LOW_HULL_RETREAT: f32 = 0.3;
+
+/// Snapshot row used by the combat / SOS / damage passes. Built once per step
+/// (a frozen view of entity state) so each pass can look ships up by id
+/// without re-borrowing `self.entities`. Fields: id, team, pos, vel, radius,
+/// armed, hull fraction, disabled.
+type Combatant = (EntityId, Team, Vec3, Vec3, f32, bool, f32, bool);
 /// Minimum number of idle armed enemies needed to form a raid wave; reinforce-
 /// ments join an existing wave even below this threshold.
 pub const WAVE_SIZE_MIN: usize = 3;
+/// Hull fraction the disabler beam clamps its target to. The target is flagged
+/// Disabled at this floor instead of being killed.
+pub const DISABLER_HULL_FLOOR: f32 = 0.05;
+/// Hull fraction at or below which a salvager will accept a target for auto
+/// disabling. Above this, the salvager holds fire so a fresh full-hull enemy
+/// isn't wasted on a weak disabler shot.
+pub const DISABLER_ENGAGE_HULL: f32 = 0.6;
 
 /// Active enemy raid wave: a coordinated group of armed enemy ships focused on
 /// a single player target (the mothership for the prototype). The commander
@@ -547,6 +566,11 @@ pub struct Entity {
     /// "Home" position the ship returns to after a Defensive engagement ends.
     /// Set on spawn, on every `MoveTo`, and when stance is set to Defensive.
     pub anchor: Option<Vec3>,
+    /// True once a disabler beam has clamped this ship's hull to the non-lethal
+    /// floor. Disabled ships do not move under their own power, do not fire,
+    /// are skipped by auto-targeting / SOS / wave conscription, and are
+    /// eligible to be towed by a friendly salvager.
+    pub disabled: bool,
 }
 
 /// Stable id for an in-flight projectile (incrementing; transient lifetime).
@@ -777,15 +801,18 @@ impl World {
             target: None,
             attack_target: None,
             weapon_cooldown: 0.0,
-            // Motherships, harvesters, and salvagers default to Passive so they
-            // never go off to hunt; the commander AI / SOS / explicit orders
-            // move them, and salvagers approach disabled targets to capture them
-            // rather than picking a fight.
+            // Motherships and harvesters default to Passive so they never go
+            // off to hunt; the commander AI / SOS / explicit orders move them.
+            // Salvagers spawn Defensive: the disabler auto-target filter
+            // (DISABLER_ENGAGE_HULL) keeps them holding fire on full-hull
+            // enemies, so they only engage targets that combat ships have
+            // already softened.
             stance: match ship.class {
-                ShipClass::Carrier | ShipClass::Resourcer | ShipClass::Salvager => Stance::Passive,
+                ShipClass::Carrier | ShipClass::Resourcer => Stance::Passive,
                 _ => Stance::Defensive,
             },
             anchor: Some(transform.pos),
+            disabled: false,
         });
         id
     }
@@ -890,6 +917,7 @@ impl World {
                 .iter()
                 .filter(|e| {
                     e.ship.team == Team::Enemy
+                        && !e.disabled
                         && e.attack_target.is_none()
                         && self.registry.get(e.ship.class).weapon.is_some()
                 })
@@ -906,7 +934,7 @@ impl World {
                 formed_tick: self.tick,
             });
             for e in &mut self.entities {
-                if e.ship.team != Team::Enemy || e.attack_target.is_some() {
+                if e.ship.team != Team::Enemy || e.attack_target.is_some() || e.disabled {
                     continue;
                 }
                 let bp = self.registry.get(e.ship.class);
@@ -1116,7 +1144,7 @@ impl World {
         if !player_positions.is_empty() {
             let rally = depot.map(|(p, _)| p);
             for e in &mut self.entities {
-                if e.ship.team != Team::Enemy {
+                if e.ship.team != Team::Enemy || e.disabled {
                     continue;
                 }
                 // Commander-driven raid waves and SOS rallies set attack_target
@@ -1188,6 +1216,7 @@ impl World {
             for e in &mut self.entities {
                 if e.ship.team != vteam
                     || e.id == *vic_id
+                    || e.disabled
                     || e.stance == Stance::Passive
                     || e.attack_target.is_some()
                     || e.gather.is_some()
@@ -1201,6 +1230,11 @@ impl World {
             }
         }
         for e in &mut self.entities {
+            // Disabled ships do not pursue, anchor-return, or hold any AI
+            // intent. They wait for a tow.
+            if e.disabled {
+                continue;
+            }
             let weapon_range = self
                 .registry
                 .get(e.ship.class)
@@ -1253,6 +1287,15 @@ impl World {
         // else a manual move order) with arrive + separation, clamped to limits.
         for e in &mut self.entities {
             e.prev_transform = e.transform;
+
+            // Disabled ships drift only on residual velocity + separation; they
+            // don't follow goals, patrols, or move orders. Damp their velocity
+            // so a high-speed kill doesn't keep a disabled hull skating off.
+            if e.disabled {
+                e.velocity.linear *= (1.0 - dt).max(0.0);
+                e.transform.pos += e.velocity.linear * dt;
+                continue;
+            }
 
             if let Some(p) = e.patrol.as_mut() {
                 p.angle += p.angular_speed * dt;
@@ -1359,11 +1402,16 @@ impl World {
         // nearest hostile in weapon range and fires on cooldown; projectiles are
         // entities integrated below. Deterministic: a positions snapshot taken
         // before firing, stable id-order iteration, seeded math, no wall-clock.
-        let combatants: Vec<(EntityId, Team, Vec3, Vec3, f32, bool)> = self
+        // Per-entity snapshot used by separation, target acquisition, SOS, and
+        // the damage apply pass. Extending the tuple is cheaper than threading
+        // more queries through the borrow checker. Fields: id, team, pos, vel,
+        // radius, armed, hull fraction, disabled.
+        let combatants: Vec<Combatant> = self
             .entities
             .iter()
             .map(|e| {
                 let bp = self.registry.get(e.ship.class);
+                let hull_frac = (e.hull / bp.max_hull.max(1.0)).clamp(0.0, 1.0);
                 (
                     e.id,
                     e.ship.team,
@@ -1371,6 +1419,8 @@ impl World {
                     e.velocity.linear,
                     bp.radius,
                     bp.weapon.is_some(),
+                    hull_frac,
+                    e.disabled,
                 )
             })
             .collect();
@@ -1380,6 +1430,13 @@ impl World {
         let mut events: Vec<CombatEvent> = Vec::new();
         let mut next_pid = self.next_projectile_id;
         for e in &mut self.entities {
+            // Disabled ships sit dead in the water: no firing and no targeting,
+            // until a friendly salvager tows them home.
+            if e.disabled {
+                e.target = None;
+                e.attack_target = None;
+                continue;
+            }
             let bp = self.registry.get(e.ship.class);
             let Some(weapon) = bp.weapon else {
                 e.target = None;
@@ -1423,14 +1480,27 @@ impl World {
                 });
             }
             if target.is_none() && acquire_d2 > 0.0 {
-                let mut best_d2 = f32::INFINITY;
-                for &(id, t, pos, vel, _r, _armed) in &combatants {
-                    if t == team || id == my_id {
+                // Salvager bias: prefer the most-wounded hostile in range, and
+                // only engage if it's already softer than DISABLER_ENGAGE_HULL
+                // (so the disabler's HP-scaled damage actually does work).
+                // Other weapons keep the legacy "nearest hostile" rule. Already
+                // disabled hostiles are skipped: nothing useful to do to them.
+                let is_disabler = matches!(weapon.kind, WeaponKind::Disabler);
+                let mut best_score = f32::INFINITY;
+                for &(id, t, pos, vel, _r, _armed, hull, disabled) in &combatants {
+                    if t == team || id == my_id || disabled {
                         continue;
                     }
                     let d2 = (pos - my_pos).length_squared();
-                    if d2 <= acquire_d2 && d2 < best_d2 {
-                        best_d2 = d2;
+                    if d2 > acquire_d2 {
+                        continue;
+                    }
+                    if is_disabler && hull > DISABLER_ENGAGE_HULL {
+                        continue;
+                    }
+                    let score = if is_disabler { hull } else { d2 };
+                    if score < best_score {
+                        best_score = score;
                         target = Some((id, pos, vel));
                     }
                 }
@@ -1482,7 +1552,7 @@ impl World {
         // Each hit records (target, attacker, damage, hit-from direction, impact
         // point) so we can apply the facing shield model, emit an impact effect,
         // and let the victim flee or retaliate against the attacker.
-        let mut damage: Vec<(EntityId, EntityId, f32, Vec3, Vec3)> = Vec::new();
+        let mut damage: Vec<(EntityId, EntityId, WeaponKind, f32, Vec3, Vec3)> = Vec::new();
         let mut surviving: Vec<Projectile> = Vec::with_capacity(self.projectiles.len());
         for mut p in std::mem::take(&mut self.projectiles) {
             p.prev_pos = p.pos;
@@ -1505,7 +1575,7 @@ impl World {
             // Earliest hostile hit along the swept segment (CCD; no tunneling).
             let mut best_t = f32::INFINITY;
             let mut best_id: Option<EntityId> = None;
-            for &(id, t, c, _vel, r, _armed) in &combatants {
+            for &(id, t, c, _vel, r, _armed, _hull, _disabled) in &combatants {
                 if t == p.team {
                     continue;
                 }
@@ -1518,7 +1588,14 @@ impl World {
             }
             if let Some(id) = best_id {
                 let impact = a.lerp(b, best_t);
-                damage.push((id, p.owner, p.damage, (-p.vel).normalize_or_zero(), impact));
+                damage.push((
+                    id,
+                    p.owner,
+                    p.kind,
+                    p.damage,
+                    (-p.vel).normalize_or_zero(),
+                    impact,
+                ));
             } else if p.life > 0.0 {
                 surviving.push(p);
             }
@@ -1530,22 +1607,31 @@ impl World {
         // A non-combat (unarmed or Passive) victim flees toward the nearest armed
         // ally; an armed combat ship without a commanded target retaliates by
         // locking the attacker as its `attack_target`.
-        for (target_id, attacker_id, dmg, hit_from, impact) in damage {
+        for (target_id, attacker_id, kind, base_dmg, hit_from, impact) in damage {
             // Precompute everything that needs the snapshot, since `entity_mut`
             // below takes an exclusive borrow on `self.entities`.
-            let Some((_, vteam, vpos, _, _, varmed)) =
+            let Some((_, vteam, vpos, _, _, varmed, vhull_frac, vdisabled)) =
                 combatants.iter().find(|c| c.0 == target_id).copied()
             else {
                 continue;
             };
+            // Disabler effectiveness ramps inversely with the target's current
+            // hull fraction: weak on full hulls, near-double damage on wounded
+            // targets. The combat-ships-first / salvager-finishes loop falls
+            // out of this curve.
+            let dmg = if matches!(kind, WeaponKind::Disabler) {
+                base_dmg * (0.2 + 1.6 * (1.0 - vhull_frac))
+            } else {
+                base_dmg
+            };
             let attacker = combatants.iter().find(|c| c.0 == attacker_id).copied();
-            let flee_to: Option<Vec3> = if varmed {
+            let flee_to: Option<Vec3> = if varmed || vdisabled {
                 None
             } else {
                 let mut best_d2 = f32::INFINITY;
                 let mut best: Option<Vec3> = None;
-                for &(cid, ct, cp, _, _, ca) in &combatants {
-                    if cid == target_id || ct != vteam || !ca {
+                for &(cid, ct, cp, _, _, ca, _, cdisabled) in &combatants {
+                    if cid == target_id || ct != vteam || !ca || cdisabled {
                         continue;
                     }
                     let d2 = (cp - vpos).length_squared();
@@ -1556,22 +1642,47 @@ impl World {
                 }
                 best
             };
+            // Precompute the victim's max hull before the mutable borrow below;
+            // it's needed for the disabler floor clamp.
+            let max_hull = self
+                .entities
+                .iter()
+                .find(|e| e.id == target_id)
+                .map(|e| self.registry.get(e.ship.class).max_hull.max(1.0))
+                .unwrap_or(1.0);
             if let Some(e) = self.entity_mut(target_id) {
                 let facing = hit_from.dot(e.transform.rot * Vec3::Z);
-                let (shield, hull) = apply_hit(e.shield, e.hull, dmg, facing);
+                let (shield, mut hull) = apply_hit(e.shield, e.hull, dmg, facing);
                 let shielded = shield < e.shield;
                 events.push(CombatEvent::Hit {
                     pos: impact,
                     shielded,
                 });
                 e.shield = shield;
+                // Disabler hits clamp the hull to a non-lethal floor and flip
+                // the Disabled flag. Other weapons can still kill a disabled
+                // ship if explicitly fired on (the player accepting collateral).
+                if matches!(kind, WeaponKind::Disabler) && hull <= max_hull * DISABLER_HULL_FLOOR {
+                    hull = max_hull * DISABLER_HULL_FLOOR;
+                    if !e.disabled {
+                        e.disabled = true;
+                        e.target = None;
+                        e.attack_target = None;
+                        e.order = None;
+                    }
+                }
                 e.hull = hull;
                 e.shield_regen_cooldown = SHIELD_REGEN_DELAY;
+                // A disabled target has no reactions: it cannot flee, retaliate
+                // or coordinate. Players or commanders own its fate from here.
+                if e.disabled {
+                    continue;
+                }
                 if !varmed || e.stance == Stance::Passive {
                     if let Some(p) = flee_to {
                         e.order = Some(p);
                     }
-                } else if let Some((aid, ateam, _, _, _, aarmed)) = attacker {
+                } else if let Some((aid, ateam, _, _, _, aarmed, _, _)) = attacker {
                     if ateam != e.ship.team {
                         match e.attack_target {
                             None => e.attack_target = Some(aid),
@@ -1746,6 +1857,7 @@ impl World {
             h = fnv1a(h, e.hull.to_bits());
             h = fnv1a(h, e.shield.to_bits());
             h = fnv1a(h, e.stance as u32);
+            h = fnv1a(h, e.disabled as u32);
             let (ax, ay, az, ap) = match e.anchor {
                 Some(a) => (a.x, a.y, a.z, 1u32),
                 None => (0.0, 0.0, 0.0, 0u32),
@@ -2291,6 +2403,91 @@ mod tests {
         assert!(
             moved > 2.0 || killed,
             "aggressive should close on (or destroy) an out-of-range hostile: moved {moved}, killed {killed}",
+        );
+    }
+
+    #[test]
+    fn disabler_disables_a_wounded_enemy_and_does_not_kill_it() {
+        let mut w = World::new(91);
+        w.spawn_class(ShipClass::Salvager, Team::Player, Vec3::ZERO);
+        let f = w.spawn_class(ShipClass::Fighter, Team::Enemy, Vec3::new(15.0, 0.0, 0.0));
+        // Soften the fighter so the salvager's disabler engage filter is met.
+        let max_hull = w.registry.get(ShipClass::Fighter).max_hull;
+        w.entities.iter_mut().find(|e| e.id == f).unwrap().hull = max_hull * 0.25;
+        let mut disabled = false;
+        for _ in 0..(TICK_HZ * 6) {
+            w.step(TICK_DT);
+            if let Some(fe) = w.entity(f) {
+                if fe.disabled {
+                    disabled = true;
+                    assert!(
+                        fe.hull >= max_hull * (DISABLER_HULL_FLOOR - 1e-3),
+                        "hull should be clamped to the disabler floor, got {}",
+                        fe.hull,
+                    );
+                    break;
+                }
+            } else {
+                panic!("fighter should be disabled, not destroyed");
+            }
+        }
+        assert!(
+            disabled,
+            "wounded fighter should be disabled by the salvager"
+        );
+    }
+
+    #[test]
+    fn salvager_holds_fire_against_full_hull_targets() {
+        let mut w = World::new(93);
+        let s = w.spawn_class(ShipClass::Salvager, Team::Player, Vec3::ZERO);
+        // Unarmed resourcer at full hull: above DISABLER_ENGAGE_HULL, so the
+        // salvager should never auto-target it, and it can't shoot back to
+        // trigger retaliation.
+        w.spawn_class(ShipClass::Resourcer, Team::Enemy, Vec3::new(15.0, 0.0, 0.0));
+        for _ in 0..(TICK_HZ * 2) {
+            w.step(TICK_DT);
+            assert!(
+                w.entity(s).and_then(|e| e.target).is_none(),
+                "salvager must hold fire on a full-hull target",
+            );
+        }
+    }
+
+    #[test]
+    fn disabled_ship_does_not_fire_or_pursue() {
+        let mut w = World::new(95);
+        let f = w.spawn_class(ShipClass::Fighter, Team::Enemy, Vec3::ZERO);
+        w.spawn_class(ShipClass::Corvette, Team::Player, Vec3::new(10.0, 0.0, 0.0));
+        // Mark the fighter disabled (as if a disabler just clamped it).
+        let max_hull = w.registry.get(ShipClass::Fighter).max_hull;
+        {
+            let fe = w.entities.iter_mut().find(|e| e.id == f).unwrap();
+            fe.disabled = true;
+            fe.hull = max_hull * DISABLER_HULL_FLOOR;
+            fe.attack_target = None;
+            fe.target = None;
+        }
+        let p0 = w.projectiles.len();
+        for _ in 0..(TICK_HZ * 2) {
+            w.step(TICK_DT);
+        }
+        let fe = w.entity(f).expect("disabled fighter should not despawn");
+        assert!(fe.target.is_none(), "disabled ship must not auto-acquire");
+        assert!(
+            fe.attack_target.is_none(),
+            "disabled ship must not retaliate",
+        );
+        // No new projectiles from the fighter (the corvette may still fire on
+        // it; that's the manual-scuttle escape hatch and is fine).
+        let fighter_fired = w
+            .projectiles
+            .iter()
+            .any(|p| p.owner == f && p.team == Team::Enemy);
+        let _ = p0;
+        assert!(
+            !fighter_fired,
+            "disabled fighter must not produce projectiles"
         );
     }
 
