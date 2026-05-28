@@ -212,6 +212,30 @@ pub struct Blueprint {
     pub sensor_range: f32,
     /// Weapon mount, or `None` for unarmed classes (resourcer, carrier).
     pub weapon: Option<Weapon>,
+    /// Shield capacity (0 for strike craft). Damage hits the shield before the
+    /// hull, modulated by facing (`design.md` §6.8); the HUD shows it in blue.
+    pub max_shield: f32,
+    /// Shield recharge per second, applied after [`SHIELD_REGEN_DELAY`] with no
+    /// hits.
+    pub shield_regen: f32,
+}
+
+/// Seconds a ship must go un-hit before its shield starts to recharge.
+pub const SHIELD_REGEN_DELAY: f32 = 4.0;
+
+/// Per-class shield capacity and recharge rate (per second). Strike craft have
+/// none; capitals and the carrier carry heavy shields. Demo-tuned.
+fn shield_for(class: ShipClass) -> (f32, f32) {
+    let max = match class {
+        ShipClass::Fighter | ShipClass::Bomber => 0.0,
+        ShipClass::Corvette => 40.0,
+        ShipClass::Resourcer => 30.0,
+        ShipClass::FrigateGeneral => 300.0,
+        ShipClass::FrigateMissile => 280.0,
+        ShipClass::CapitalDestroyer => 1500.0,
+        ShipClass::Carrier => 4000.0,
+    };
+    (max, max * 0.06)
 }
 
 /// Read-only table of per-class blueprints. Lookups are by key (deterministic);
@@ -296,6 +320,7 @@ impl ShipRegistry {
         ];
         let mut blueprints = HashMap::new();
         for (class, mass, max_speed, accel, turn_rate_deg, radius, max_hull, cargo) in rows {
+            let (max_shield, shield_regen) = shield_for(class);
             // Crew requirement (of the class's CrewKind), salvage cost, and build
             // seconds. Carriers require no crew: they PROVIDE the pool (see
             // CARRIER_CREW_*). Demo-tuned; eventual values live in ship.json.
@@ -325,6 +350,8 @@ impl ShipRegistry {
                     build_time,
                     sensor_range,
                     weapon: weapon_for(class),
+                    max_shield,
+                    shield_regen,
                 },
             );
         }
@@ -430,9 +457,14 @@ pub struct Entity {
     pub prev_transform: Transform,
     pub velocity: Velocity,
     pub ship: Ship,
-    /// Current hull points; starts at the blueprint `max_hull`. Combat drains it
-    /// later; the HUD reads `hull / max_hull` for the health bar.
+    /// Current hull points; starts at the blueprint `max_hull`. A ship despawns
+    /// when this reaches zero; the HUD reads `hull / max_hull`.
     pub hull: f32,
+    /// Current shield points; absorbs damage before the hull (facing-modulated)
+    /// and recharges after [`SHIELD_REGEN_DELAY`]. Starts at `max_shield`.
+    pub shield: f32,
+    /// Seconds left before the shield may recharge again (reset on every hit).
+    pub shield_regen_cooldown: f32,
     /// Active move order target, if any (steered toward with arrive + turn).
     pub order: Option<Vec3>,
     /// Optional circular patrol; when set, the step drives the transform.
@@ -620,7 +652,8 @@ impl World {
     pub fn spawn(&mut self, ship: Ship, transform: Transform) -> EntityId {
         let id = EntityId(self.next_id);
         self.next_id += 1;
-        let max_hull = self.registry.get(ship.class).max_hull;
+        let bp = self.registry.get(ship.class);
+        let (max_hull, max_shield) = (bp.max_hull, bp.max_shield);
         self.entities.push(Entity {
             id,
             transform,
@@ -628,6 +661,8 @@ impl World {
             velocity: Velocity::default(),
             ship,
             hull: max_hull,
+            shield: max_shield,
+            shield_regen_cooldown: 0.0,
             order: None,
             patrol: None,
             gather: None,
@@ -1069,7 +1104,9 @@ impl World {
         // Projectile pass: home (missiles), integrate, swept hit-test against
         // hostile ships, then apply damage. Newly fired shots are appended after,
         // so they wait one step before moving (no instant-hit at the muzzle).
-        let mut damage: Vec<(EntityId, f32)> = Vec::new();
+        // Each hit records (target, damage, direction the shot came from) so the
+        // facing-modulated shield model can be applied in order below.
+        let mut damage: Vec<(EntityId, f32, Vec3)> = Vec::new();
         let mut surviving: Vec<Projectile> = Vec::with_capacity(self.projectiles.len());
         for mut p in std::mem::take(&mut self.projectiles) {
             p.prev_pos = p.pos;
@@ -1104,20 +1141,40 @@ impl World {
                 }
             }
             if let Some(id) = best_id {
-                damage.push((id, p.damage));
+                damage.push((id, p.damage, (-p.vel).normalize_or_zero()));
             } else if p.life > 0.0 {
                 surviving.push(p);
             }
         }
         self.projectiles = surviving;
-        for (id, dmg) in damage {
+        // Apply hits in order: the shield absorbs first (strongest on the front,
+        // weakest on the rear), the rest hits the hull; any hit pauses regen.
+        for (id, dmg, hit_from) in damage {
             if let Some(e) = self.entity_mut(id) {
-                e.hull -= dmg;
+                let facing = hit_from.dot(e.transform.rot * Vec3::Z);
+                let (shield, hull) = apply_hit(e.shield, e.hull, dmg, facing);
+                e.shield = shield;
+                e.hull = hull;
+                e.shield_regen_cooldown = SHIELD_REGEN_DELAY;
             }
         }
         // Despawn destroyed ships; `retain` keeps the survivors in spawn order.
         self.entities.retain(|e| e.hull > 0.0);
         self.projectiles.append(&mut new_projectiles);
+
+        // Shield recharge: after the post-hit delay elapses, shields regenerate
+        // toward `max_shield`. Stable order; runs for every shielded survivor.
+        for e in &mut self.entities {
+            let bp = self.registry.get(e.ship.class);
+            if bp.max_shield <= 0.0 {
+                continue;
+            }
+            if e.shield_regen_cooldown > 0.0 {
+                e.shield_regen_cooldown = (e.shield_regen_cooldown - dt).max(0.0);
+            } else if e.shield < bp.max_shield {
+                e.shield = (e.shield + bp.shield_regen * dt).min(bp.max_shield);
+            }
+        }
 
         // 4) Resource harvest / deposit, in a separate pass so the node list and
         // the salvage pool aren't aliased with the entity iteration. Stable
@@ -1221,6 +1278,7 @@ impl World {
                 h = fnv1a(h, v.to_bits());
             }
             h = fnv1a(h, e.hull.to_bits());
+            h = fnv1a(h, e.shield.to_bits());
             h = fnv1a(h, e.gather.map(|g| g.carrying).unwrap_or(0.0).to_bits());
         }
         h = fnv1a(h, self.salvage.to_bits());
@@ -1245,6 +1303,17 @@ impl World {
 /// One FNV-1a round over a 32-bit word.
 fn fnv1a(h: u64, x: u32) -> u64 {
     (h ^ x as u64).wrapping_mul(0x0000_0100_0000_01b3)
+}
+
+/// Apply a hit of `dmg` to a `(shield, hull)` pair, returning the new values.
+/// `facing` is the dot of the incoming direction with the target's forward in
+/// `[-1, 1]`: +1 struck the front (shield strongest), 0 the side, -1 the rear
+/// (shield ineffective). The shield absorbs what it can of the facing-scaled
+/// damage; the remainder hits the hull (`design.md` §6.8 shield facing).
+fn apply_hit(shield: f32, hull: f32, dmg: f32, facing: f32) -> (f32, f32) {
+    let shield_mult = 0.5 + 0.5 * facing.clamp(-1.0, 1.0);
+    let absorbed = (dmg * shield_mult).min(shield);
+    (shield - absorbed, hull - (dmg - absorbed))
 }
 
 /// Deterministic lead/intercept aim (`design.md` §6.8): direction a shot of
@@ -1656,6 +1725,41 @@ mod tests {
         assert!(
             w.entity(a).is_some(),
             "the corvette should survive the fighter"
+        );
+    }
+
+    #[test]
+    fn shield_absorbs_by_facing() {
+        // Front hit: shield fully engaged (absorbs min(dmg, shield)).
+        let (s, h) = apply_hit(40.0, 400.0, 60.0, 1.0);
+        assert!(s.abs() < 1e-3 && (h - 380.0).abs() < 1e-3, "front: {s},{h}");
+        // Rear hit: shield ineffective, all damage to hull.
+        let (s, h) = apply_hit(40.0, 400.0, 60.0, -1.0);
+        assert!(
+            (s - 40.0).abs() < 1e-3 && (h - 340.0).abs() < 1e-3,
+            "rear: {s},{h}"
+        );
+        // Side hit: half engaged (absorbs 30, 30 to hull).
+        let (s, h) = apply_hit(40.0, 400.0, 60.0, 0.0);
+        assert!(
+            (s - 10.0).abs() < 1e-3 && (h - 370.0).abs() < 1e-3,
+            "side: {s},{h}"
+        );
+    }
+
+    #[test]
+    fn shields_regenerate_after_delay() {
+        let mut w = World::new(3);
+        let id = w.spawn_class(ShipClass::FrigateGeneral, Team::Player, Vec3::ZERO);
+        let max = w.registry.get(ShipClass::FrigateGeneral).max_shield;
+        w.entities[0].shield = 0.0; // drained; no enemies, so it recharges
+        for _ in 0..(TICK_HZ * 8) {
+            w.step(TICK_DT);
+        }
+        let s = w.entity(id).unwrap().shield;
+        assert!(
+            s > 0.0 && s <= max + 1e-3,
+            "shield should regenerate: {s} / {max}"
         );
     }
 

@@ -679,14 +679,32 @@ impl App {
             }
 
             // HUD bars above the ship (suppressed in the zoomed-out sensors view):
-            // health (when selected or damaged, so combat is legible) then a gold
-            // cargo / harvest bar (whenever a resourcer has an active gather task).
-            let max_hull = self.world.registry.get(e.ship.class).max_hull;
-            let hf = (e.hull / max_hull.max(1.0)).clamp(0.0, 1.0);
-            let damaged = hf < 0.999;
+            // a blue shield bar (top), the hull bar (when selected or damaged, so
+            // combat is legible), then a gold cargo / harvest bar for resourcers.
+            let bp = self.world.registry.get(e.ship.class);
+            let hf = (e.hull / bp.max_hull.max(1.0)).clamp(0.0, 1.0);
+            let sfrac = if bp.max_shield > 0.0 {
+                (e.shield / bp.max_shield).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            let damaged = hf < 0.999 || sfrac < 0.999;
             if !sensors && (selected || damaged || e.gather.is_some()) {
                 if let Some((sx, sy)) = self.project_to_screen(pos + Vec3::Y * (r * 0.8 + 1.2)) {
                     let mut row = sy;
+                    if bp.max_shield > 0.0 && (selected || damaged) {
+                        let sc = [0.3, 0.65, 1.0, 0.95];
+                        push_bar(
+                            &mut overlay_tris,
+                            &mut overlay_lines,
+                            sx,
+                            row,
+                            sfrac,
+                            sc,
+                            (vw, vh),
+                        );
+                        row += 9.0;
+                    }
                     if selected || damaged {
                         let hc = [1.0 - hf, 0.25 + 0.7 * hf, 0.18, 0.95];
                         push_bar(

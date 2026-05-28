@@ -777,13 +777,17 @@ test (CCD, no tunneling). Every ship **auto-engages** the nearest hostile in
 weapon range and fires on cooldown; the enemy AI now closes to a weapon-range
 standoff instead of ramming. Players can also issue a manual **attack order**
 (RMB or tap a hostile): the selected ships pursue that target to weapon range and
-focus fire (`Command::Attack`), shown by a red lead line and reticle. Impacts
-subtract flat **hull** damage and a ship at
-zero hull despawns. (Shields, hull sections, and positional/subsystem damage from
-[§6.3](#63-structure-hitboxes--positional-damage)/[§6.8](#68-ballistics--projectiles)
-are still deferred.) The renderer draws projectile tracers + glints and an
-expanding burst when a ship dies (both purely visual, read from sim state);
-health bars now appear over any damaged ship, not just selected ones.
+focus fire (`Command::Attack`), shown by a red lead line and reticle. Larger
+ships carry a **shield** (`max_shield` + recharge after a no-hit delay) that
+absorbs damage before the hull, **modulated by facing** ([§6.8](#68-ballistics--projectiles)):
+a front hit is fully blocked while a rear hit bypasses the shield entirely, so
+flanking matters. Overflow (and all damage to unshielded strike craft) hits the
+**hull**, and a ship at zero hull despawns. (Hull sections and subsystem disable
+from [§6.3](#63-structure-hitboxes--positional-damage) are still deferred; facing
+is the first positional step.) The renderer draws projectile tracers + glints and
+an expanding burst when a ship dies (both purely visual, read from sim state);
+health bars now appear over any damaged ship (blue shield over red hull), not
+just selected ones.
 
 Because `WASD` pans here, the target table's `W/S/D` order keys (waypoint / stop /
 dock) are not yet bound; `Stop` and `Select All` move to `Shift+S` / `Shift+A`
