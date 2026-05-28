@@ -32,16 +32,7 @@ Items that fail get moved back to Pending with a note on what's still wrong.
 
 ## Rendering
 
-- [ ] **(13) Grid dots.** Color **white**; positions **integer-locked**
-  (snap to `n * 10` in world units); only **near the camera pivot** so the
-  grid feels infinite as the camera moves.
-- [ ] **(14) Lock FPS at 60.**
-- [ ] **(15) Nebula no-clip.** Nebula follows the camera (skybox-style) and
-  the camera far plane is doubled.
-- [ ] **(16) Stars fixed distance from camera** (skybox-style).
-- [ ] **(17) Build overlay has no nebula** behind the previewed ship.
-- [ ] **(18) Resource patches as orange dots in Sensors view.**
-- [ ] **(19) Resource dust puff bigger.**
+(items 13-19 implemented; see "Awaiting validation" below)
 
 ---
 
@@ -81,3 +72,27 @@ Items that fail get moved back to Pending with a note on what's still wrong.
   V still works as an alias.
 - [ ] **(12) P = Pause.** New hotkey. The Pause button on the HUD still
   works too.
+- [ ] **(13) Grid dots.** `build_grid` is now per-frame around the camera
+  pivot; positions snap to nearest 10; color is white with a soft fade out
+  toward the rim. `Renderer::set_grid` re-uploads cheaply each frame.
+- [ ] **(14) Lock FPS at 60.** `RedrawRequested` schedules the next loop
+  iteration ~16.67ms out via `ControlFlow::WaitUntil`. On web this is a
+  no-op (browser vsync wins); on >60Hz native it caps the frame rate.
+- [ ] **(15) Nebula no-clip.** Camera `z_far` doubled from 1000 -> 2000.
+  Nebula vertices are translated by `camera.focus` in the bg shader via a
+  new `bg_offset` field on the camera uniform, so the nebula rides the
+  camera pivot like a skybox and never visibly clips.
+- [ ] **(16) Stars fixed distance from camera.** Backdrop stars use the
+  same `bg_offset` (new `vs_main` in `stars.wgsl`). World-space particles
+  (harvest dust, hit sparks) use a new `vs_particle` entry point and the
+  matching `particle_pipeline` so they stay in world space and don't drift
+  with the camera.
+- [ ] **(17) Build overlay has no nebula.** New
+  `Renderer::set_background_visible(bool)` toggles the nebula + backdrop
+  star draws. Set false each frame while `build_open` is true; grid still
+  renders so the preview has a reference plane.
+- [ ] **(18) Resource patches as orange dots in Sensors view.** Sensors
+  pass now pushes an orange blip at every live `resource_node` (sized by
+  the node's footprint), alongside the existing ship blips.
+- [ ] **(19) Resource dust puff bigger.** Mining motes: 10 -> 18 sprites,
+  ~3x sprite size, brighter, wider jitter. Hauler trail also enlarged.

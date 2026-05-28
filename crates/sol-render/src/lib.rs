@@ -29,15 +29,27 @@ struct CameraUniform {
     view_proj: [[f32; 4]; 4],
     light_dir: [f32; 4],
     base_color: [f32; 4],
+    /// Per-frame world-space offset added to nebula + star vertex positions
+    /// in the background shader, so they follow the camera pivot like a
+    /// skybox and never clip (fix-it.md items 15 + 16). xyz = offset; w
+    /// unused.
+    bg_offset: [f32; 4],
 }
 
 impl CameraUniform {
-    fn new(view_proj: Mat4, light_dir: Vec3, base_color: Vec3, aspect: f32) -> Self {
+    fn new(
+        view_proj: Mat4,
+        light_dir: Vec3,
+        base_color: Vec3,
+        aspect: f32,
+        bg_offset: Vec3,
+    ) -> Self {
         Self {
             view_proj: view_proj.to_cols_array_2d(),
             light_dir: [light_dir.x, light_dir.y, light_dir.z, 0.0],
             // w carries the screen aspect (used to keep star sprites square).
             base_color: [base_color.x, base_color.y, base_color.z, aspect],
+            bg_offset: [bg_offset.x, bg_offset.y, bg_offset.z, 0.0],
         }
     }
 }
@@ -327,8 +339,13 @@ pub struct Renderer {
     /// near grid points) and the uploaded environment geometry.
     bg_tri_pipeline: wgpu::RenderPipeline,
     star_pipeline: wgpu::RenderPipeline,
+    particle_pipeline: wgpu::RenderPipeline,
     points_near_pipeline: wgpu::RenderPipeline,
     environment: Option<Environment>,
+    /// When false, the nebula + backdrop stars are skipped on draw so the
+    /// build overlay's centered preview gets a clean black backdrop
+    /// (fix-it.md item 17). The grid still renders.
+    background_visible: bool,
 
     /// World-space line gizmos (selection ground-circle, elevation pole, dashed
     /// move line); drawn on top of the scene so selection stays visible.
@@ -434,7 +451,8 @@ impl Renderer {
         let depth_view = create_depth_view(&device, &config);
 
         // Camera uniform + bind group.
-        let camera_uniform = CameraUniform::new(Mat4::IDENTITY, Vec3::Y, Vec3::ONE, 1.0);
+        let camera_uniform =
+            CameraUniform::new(Mat4::IDENTITY, Vec3::Y, Vec3::ONE, 1.0, Vec3::ZERO);
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("camera uniform"),
             contents: bytemuck::bytes_of(&camera_uniform),
@@ -565,6 +583,8 @@ impl Renderer {
             false,
             wgpu::CompareFunction::Always,
             "fs_main",
+            // Nebula rides the camera pivot (uses bg_offset).
+            "vs_main",
         );
         let points_near_pipeline = bg_pipeline(
             &device,
@@ -575,6 +595,8 @@ impl Renderer {
             true,
             wgpu::CompareFunction::Less,
             "fs_main",
+            // Grid: host already supplies snapped world positions; skip offset.
+            "vs_grid",
         );
         // Star sprites: instanced additive quads (corners from the vertex index).
         let star_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -586,48 +608,58 @@ impl Renderer {
             dst_factor: wgpu::BlendFactor::One,
             operation: wgpu::BlendOperation::Add,
         };
-        let star_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("star pipeline"),
+        // Two pipelines off the same star shader: vs_main applies bg_offset
+        // (backdrop stars ride the camera pivot, fix-it.md item 16),
+        // vs_particle uses raw world coords (harvest dust, hit sparks).
+        let star_buffers = [StarInstance::layout()];
+        let star_targets = [Some(wgpu::ColorTargetState {
+            format: config.format,
+            blend: Some(wgpu::BlendState {
+                color: additive,
+                alpha: additive,
+            }),
+            write_mask: wgpu::ColorWrites::ALL,
+        })];
+        let star_primitive = wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        };
+        let star_depth = wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Always),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        };
+        let mk_star = |label: &'static str, vs: &'static str| wgpu::RenderPipelineDescriptor {
+            label: Some(label),
             layout: Some(&bg_layout),
             vertex: wgpu::VertexState {
                 module: &star_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[StarInstance::layout()],
+                entry_point: Some(vs),
+                buffers: &star_buffers,
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &star_shader,
                 entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState {
-                        color: additive,
-                        alpha: additive,
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
+                targets: &star_targets,
                 compilation_options: Default::default(),
             }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                unclipped_depth: false,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Always),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
+            primitive: star_primitive,
+            depth_stencil: Some(star_depth.clone()),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache: None,
-        });
+        };
+        let star_pipeline = device.create_render_pipeline(&mk_star("star pipeline", "vs_main"));
+        let particle_pipeline =
+            device.create_render_pipeline(&mk_star("particle pipeline", "vs_particle"));
 
         // World-space line gizmos: reuse the vertex-colored background shader,
         // drawn as line segments on top of the scene (depth test Always, no
@@ -641,6 +673,8 @@ impl Renderer {
             false,
             wgpu::CompareFunction::Always,
             "fs_main",
+            // World-space lines: caller passes world positions; no offset.
+            "vs_grid",
         );
 
         // Screen-space HUD overlay pipelines (clip-space, no camera, alpha
@@ -767,8 +801,10 @@ impl Renderer {
             sampler,
             bg_tri_pipeline,
             star_pipeline,
+            particle_pipeline,
             points_near_pipeline,
             environment: None,
+            background_visible: true,
             line_pipeline,
             gizmo_lines,
             particles,
@@ -940,6 +976,30 @@ impl Renderer {
         });
     }
 
+    /// Show or hide the nebula + backdrop stars (fix-it.md item 17). Used by
+    /// the build overlay to render the previewed ship against a clean black
+    /// backdrop. The grid keeps rendering either way.
+    pub fn set_background_visible(&mut self, visible: bool) {
+        self.background_visible = visible;
+    }
+
+    /// Re-upload only the grid points (fix-it.md item 13: the grid follows the
+    /// camera pivot each frame). Cheap: the grid is hundreds of vertices.
+    pub fn set_grid(&mut self, grid: &[BgVertex]) {
+        let Some(env) = self.environment.as_mut() else {
+            return;
+        };
+        let grid_vbuf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("grid.vbuf"),
+                contents: bytemuck::cast_slice(grid),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        env.grid_vbuf = grid_vbuf;
+        env.grid_count = grid.len() as u32;
+    }
+
     /// Upload per-frame HUD overlays, consumed by the next `render_groups`:
     /// `gizmo_lines` are world-space line segments (selection circle / elevation
     /// pole / dashed move line); `overlay_tris` and `overlay_lines` are
@@ -1011,6 +1071,8 @@ impl Renderer {
             light_dir,
             Vec3::ONE,
             self.aspect(),
+            // Nebula + stars ride the camera pivot so they never clip.
+            camera.focus,
         );
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniform));
@@ -1092,13 +1154,15 @@ impl Renderer {
             // grid (depth-tested), so ships render over them correctly.
             if let Some(env) = &self.environment {
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                pass.set_pipeline(&self.bg_tri_pipeline);
-                pass.set_vertex_buffer(0, env.nebula_vbuf.slice(..));
-                pass.set_index_buffer(env.nebula_ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..env.nebula_index_count, 0, 0..1);
-                pass.set_pipeline(&self.star_pipeline);
-                pass.set_vertex_buffer(0, env.star_inst_buf.slice(..));
-                pass.draw(0..6, 0..env.star_count);
+                if self.background_visible {
+                    pass.set_pipeline(&self.bg_tri_pipeline);
+                    pass.set_vertex_buffer(0, env.nebula_vbuf.slice(..));
+                    pass.set_index_buffer(env.nebula_ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..env.nebula_index_count, 0, 0..1);
+                    pass.set_pipeline(&self.star_pipeline);
+                    pass.set_vertex_buffer(0, env.star_inst_buf.slice(..));
+                    pass.draw(0..6, 0..env.star_count);
+                }
                 pass.set_pipeline(&self.points_near_pipeline);
                 pass.set_vertex_buffer(0, env.grid_vbuf.slice(..));
                 pass.draw(0..env.grid_count, 0..1);
@@ -1117,9 +1181,10 @@ impl Renderer {
                 pass.draw_indexed(0..mesh.index_count, 0, start..end);
             }
 
-            // Additive harvest-mote sprites (reuse the star billboard pipeline).
+            // Additive harvest-mote / explosion sprites: world-space, so they
+            // use the particle pipeline (no bg_offset).
             if self.particles.count > 0 {
-                pass.set_pipeline(&self.star_pipeline);
+                pass.set_pipeline(&self.particle_pipeline);
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
                 pass.set_vertex_buffer(0, self.particles.buffer.slice(..));
                 pass.draw(0..6, 0..self.particles.count);
@@ -1210,13 +1275,14 @@ fn bg_pipeline(
     depth_write: bool,
     depth_compare: wgpu::CompareFunction,
     frag_entry: &str,
+    vert_entry: &str,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("background pipeline"),
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: shader,
-            entry_point: Some("vs_main"),
+            entry_point: Some(vert_entry),
             buffers: &[BgVertex::layout()],
             compilation_options: Default::default(),
         },

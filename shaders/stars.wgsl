@@ -7,6 +7,9 @@ struct Camera {
     light_dir: vec4<f32>,
     // rgb = tint; w = screen aspect (width / height) for square sprites.
     base_color: vec4<f32>,
+    // Per-frame world-space offset for the star backdrop (skybox-style; see
+    // background.wgsl). World-space particles use vs_particle and ignore it.
+    bg_offset: vec4<f32>,
 };
 
 @group(0) @binding(0)
@@ -24,8 +27,7 @@ struct VertexOutput {
     @location(1) corner: vec2<f32>,
 };
 
-@vertex
-fn vs_main(@builtin(vertex_index) vi: u32, in: StarInput) -> VertexOutput {
+fn corner_for(vi: u32) -> vec2<f32> {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(-1.0, -1.0),
         vec2<f32>(1.0, -1.0),
@@ -34,16 +36,34 @@ fn vs_main(@builtin(vertex_index) vi: u32, in: StarInput) -> VertexOutput {
         vec2<f32>(1.0, 1.0),
         vec2<f32>(-1.0, 1.0),
     );
-    let corner = corners[vi];
+    return corners[vi];
+}
 
-    var clip = camera.view_proj * vec4<f32>(in.center, 1.0);
+fn billboard(center: vec3<f32>, size: f32, corner: vec2<f32>) -> vec4<f32> {
+    var clip = camera.view_proj * vec4<f32>(center, 1.0);
     let aspect = camera.base_color.w;
-    // Offset in clip space, scaled by w so the on-screen size is constant.
-    clip.x += corner.x * in.size * clip.w / aspect;
-    clip.y += corner.y * in.size * clip.w;
+    clip.x += corner.x * size * clip.w / aspect;
+    clip.y += corner.y * size * clip.w;
+    return clip;
+}
 
+// Backdrop stars: ride the camera pivot so they never clip (fix-it.md item 16).
+@vertex
+fn vs_main(@builtin(vertex_index) vi: u32, in: StarInput) -> VertexOutput {
+    let corner = corner_for(vi);
     var out: VertexOutput;
-    out.clip_position = clip;
+    out.clip_position = billboard(in.center + camera.bg_offset.xyz, in.size, corner);
+    out.color = in.color;
+    out.corner = corner;
+    return out;
+}
+
+// World-space particles (harvest dust, explosion sparks): no offset applied.
+@vertex
+fn vs_particle(@builtin(vertex_index) vi: u32, in: StarInput) -> VertexOutput {
+    let corner = corner_for(vi);
+    var out: VertexOutput;
+    out.clip_position = billboard(in.center, in.size, corner);
     out.color = in.color;
     out.corner = corner;
     return out;

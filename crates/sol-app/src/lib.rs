@@ -51,7 +51,7 @@ impl Formation {
         }
     }
 }
-use web_time::Instant;
+use web_time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -806,20 +806,23 @@ impl App {
                     if let Some(n) = self.world.node(g.node) {
                         if (pos - n.pos).length() <= n.radius + r + 3.0 {
                             let surface = n.pos + (pos - n.pos).normalize_or_zero() * n.radius;
-                            for k in 0..10u32 {
+                            // Bigger dust puff (fix-it.md item 19): more motes,
+                            // larger sprites, brighter so the harvest reads
+                            // from the strategic view.
+                            for k in 0..18u32 {
                                 let kk = k as f32;
-                                let phase = (self.elapsed * 0.6 + kk * 0.1).fract();
+                                let phase = (self.elapsed * 0.6 + kk * 0.07).fract();
                                 let jit = Vec3::new(
                                     (self.elapsed * 2.1 + kk).sin(),
                                     (self.elapsed * 1.7 + kk * 1.7).cos() + 0.4,
                                     (self.elapsed * 1.9 + kk * 0.9).sin(),
-                                ) * (0.5 * (1.0 - phase));
+                                ) * (1.1 * (1.0 - phase));
                                 let p = surface.lerp(pos, phase) + jit;
-                                let f = (1.0 - phase) * 0.12 + 0.03;
+                                let f = (1.0 - phase) * 0.22 + 0.06;
                                 particles.push(StarInstance::new(
                                     p.to_array(),
-                                    [f, f * 0.86, f * 0.66],
-                                    0.004 + 0.004 * (1.0 - phase),
+                                    [f, f * 0.84, f * 0.6],
+                                    0.014 + 0.012 * (1.0 - phase),
                                 ));
                             }
                         }
@@ -829,21 +832,21 @@ impl App {
                     let speed = v.length();
                     if speed > 1.0 {
                         let back = -v / speed;
-                        for k in 0..7u32 {
+                        for k in 0..12u32 {
                             let kk = k as f32;
                             let d = (kk + (self.elapsed * 3.0).fract()) * 0.9;
                             let jit = Vec3::new(
                                 (self.elapsed * 1.3 + kk * 2.0).sin(),
                                 (self.elapsed * 1.1 + kk).sin() * 0.4,
                                 (self.elapsed * 1.7 + kk * 1.3).cos(),
-                            ) * 0.35;
+                            ) * 0.6;
                             let p = pos + back * d + jit;
-                            let fade = (1.0 - d / 7.0).clamp(0.0, 1.0);
-                            let f = fade * 0.1 + 0.02;
+                            let fade = (1.0 - d / 11.0).clamp(0.0, 1.0);
+                            let f = fade * 0.16 + 0.04;
                             particles.push(StarInstance::new(
                                 p.to_array(),
-                                [f, f * 0.9, f * 0.72],
-                                0.004 + 0.004 * fade,
+                                [f, f * 0.88, f * 0.7],
+                                0.012 + 0.012 * fade,
                             ));
                         }
                     }
@@ -1022,6 +1025,16 @@ impl App {
                     );
                 }
             }
+            // Resource patches: orange dots so the player can plan harvesting
+            // from the strategic zoom (fix-it.md item 18). Size scales with
+            // the node's footprint; depleted nodes are skipped.
+            for n in &self.world.resource_nodes {
+                if n.amount <= 0.0 {
+                    continue;
+                }
+                let size = (n.radius * 0.9).max(1.2);
+                push_blip(&mut gizmo_lines, n.pos, size, [1.0, 0.55, 0.1]);
+            }
         }
 
         // Resource + crew + build HUD readouts (web).
@@ -1066,6 +1079,12 @@ impl App {
             .filter_map(|(class, insts)| gfx.meshes.get(class).map(|m| (m, insts.as_slice())))
             .collect();
         render_groups.push((&gfx.asteroid, asteroid_instances.as_slice()));
+        // Tactical grid follows the camera pivot (fix-it.md item 13). Cheap to
+        // rebuild + re-upload (~625 vertices).
+        gfx.renderer.set_grid(&build_grid(self.camera.focus));
+        // Build overlay backdrop: hide nebula + stars so the previewed ship
+        // sits on a clean black field (fix-it.md item 17).
+        gfx.renderer.set_background_visible(!self.build_open);
         match gfx.renderer.render_groups(&self.camera, &render_groups) {
             RenderOutcome::NeedsReconfigure => {
                 if let Some(window) = &self.window {
@@ -2155,7 +2174,14 @@ impl ApplicationHandler for App {
             WindowEvent::CursorEntered { .. } => self.cursor_in_window = true,
             WindowEvent::CursorLeft { .. } => self.cursor_in_window = false,
             WindowEvent::KeyboardInput { event, .. } => self.on_key(event),
-            WindowEvent::RedrawRequested => self.redraw(),
+            WindowEvent::RedrawRequested => {
+                self.redraw();
+                // Soft 60 FPS cap (fix-it.md item 14): schedule the next loop
+                // iteration ~16.67ms out. Browsers / vsync already cap at
+                // display refresh, so this only matters on >60Hz native.
+                let next = Instant::now() + Duration::from_micros(16_667);
+                event_loop.set_control_flow(ControlFlow::WaitUntil(next));
+            }
             _ => {}
         }
     }
@@ -2165,8 +2191,9 @@ impl ApplicationHandler for App {
 /// the wasm `start` entry point.
 pub fn run() {
     let event_loop = EventLoop::new().expect("create event loop");
-    // Continuous redraw so the orbit camera feels responsive.
-    event_loop.set_control_flow(ControlFlow::Poll);
+    // Initial flow is WaitUntil(now): the loop will tick immediately, then the
+    // RedrawRequested handler installs a 60 FPS soft cap (fix-it.md item 14).
+    event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now()));
     let mut app = App::new();
     event_loop.run_app(&mut app).expect("run event loop");
 }
@@ -2483,24 +2510,33 @@ fn build_environment() -> (Vec<BgVertex>, Vec<u32>, Vec<StarInstance>, Vec<BgVer
         [1.0, 0.95, 0.8],
         0.07,
     ));
-    (nebula, bg.nebula_indices, stars, build_grid())
+    // Grid is rebuilt per frame from the camera pivot; start at origin.
+    (nebula, bg.nebula_indices, stars, build_grid(Vec3::ZERO))
 }
 
 /// A grid of dim dots on the y=0 plane, fading with distance, as a spatial
 /// reference for movement and speed.
-fn build_grid() -> Vec<BgVertex> {
+/// Tactical reference grid (fix-it.md item 13). Positions snap to the nearest
+/// 10 around the camera pivot so the dots feel anchored to integer world
+/// coords while always staying centered on what the player is looking at.
+/// Dots are white and fade toward the rim.
+fn build_grid(pivot: Vec3) -> Vec<BgVertex> {
     const N: i32 = 25;
-    const SPACING: f32 = 6.0;
+    const SPACING: f32 = 10.0;
     let half = (N - 1) as f32 * 0.5 * SPACING;
+    let cx = (pivot.x / SPACING).round() * SPACING;
+    let cz = (pivot.z / SPACING).round() * SPACING;
     let mut pts = Vec::with_capacity((N * N) as usize);
     for i in 0..N {
         for j in 0..N {
-            let x = i as f32 * SPACING - half;
-            let z = j as f32 * SPACING - half;
-            let d = (x * x + z * z).sqrt();
+            let x = cx + i as f32 * SPACING - half;
+            let z = cz + j as f32 * SPACING - half;
+            let dx = x - cx;
+            let dz = z - cz;
+            let d = (dx * dx + dz * dz).sqrt();
             let fade = (1.0 - d / (half * 1.15)).clamp(0.0, 1.0);
-            let c = 0.05 + 0.12 * fade;
-            pts.push(BgVertex::new([x, 0.0, z], [c * 0.55, c * 0.7, c]));
+            let c = 0.1 + 0.65 * fade;
+            pts.push(BgVertex::new([x, 0.0, z], [c, c, c]));
         }
     }
     pts
