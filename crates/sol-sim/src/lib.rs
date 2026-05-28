@@ -532,6 +532,8 @@ pub struct Projectile {
     pub kind: WeaponKind,
     /// Owning team; a projectile only damages other teams.
     pub team: Team,
+    /// The ship that fired this round (so a victim can retaliate against it).
+    pub owner: EntityId,
     pub pos: Vec3,
     pub prev_pos: Vec3,
     pub vel: Vec3,
@@ -1146,16 +1148,18 @@ impl World {
         // nearest hostile in weapon range and fires on cooldown; projectiles are
         // entities integrated below. Deterministic: a positions snapshot taken
         // before firing, stable id-order iteration, seeded math, no wall-clock.
-        let combatants: Vec<(EntityId, Team, Vec3, Vec3, f32)> = self
+        let combatants: Vec<(EntityId, Team, Vec3, Vec3, f32, bool)> = self
             .entities
             .iter()
             .map(|e| {
+                let bp = self.registry.get(e.ship.class);
                 (
                     e.id,
                     e.ship.team,
                     e.transform.pos,
                     e.velocity.linear,
-                    self.registry.get(e.ship.class).radius,
+                    bp.radius,
+                    bp.weapon.is_some(),
                 )
             })
             .collect();
@@ -1209,7 +1213,7 @@ impl World {
             }
             if target.is_none() && acquire_d2 > 0.0 {
                 let mut best_d2 = f32::INFINITY;
-                for &(id, t, pos, vel, _r) in &combatants {
+                for &(id, t, pos, vel, _r, _armed) in &combatants {
                     if t == team || id == my_id {
                         continue;
                     }
@@ -1238,6 +1242,7 @@ impl World {
                         id: ProjectileId(next_pid),
                         kind: weapon.kind,
                         team,
+                        owner: my_id,
                         pos: my_pos,
                         prev_pos: my_pos,
                         vel: dir * weapon.speed,
@@ -1263,10 +1268,10 @@ impl World {
         // Projectile pass: home (missiles), integrate, swept hit-test against
         // hostile ships, then apply damage. Newly fired shots are appended after,
         // so they wait one step before moving (no instant-hit at the muzzle).
-        // Each hit records (target, damage, direction the shot came from, impact
-        // point) so the facing-modulated shield model can be applied in order, and
-        // an impact effect emitted, below.
-        let mut damage: Vec<(EntityId, f32, Vec3, Vec3)> = Vec::new();
+        // Each hit records (target, attacker, damage, hit-from direction, impact
+        // point) so we can apply the facing shield model, emit an impact effect,
+        // and let the victim flee or retaliate against the attacker.
+        let mut damage: Vec<(EntityId, EntityId, f32, Vec3, Vec3)> = Vec::new();
         let mut surviving: Vec<Projectile> = Vec::with_capacity(self.projectiles.len());
         for mut p in std::mem::take(&mut self.projectiles) {
             p.prev_pos = p.pos;
@@ -1289,7 +1294,7 @@ impl World {
             // Earliest hostile hit along the swept segment (CCD; no tunneling).
             let mut best_t = f32::INFINITY;
             let mut best_id: Option<EntityId> = None;
-            for &(id, t, c, _vel, r) in &combatants {
+            for &(id, t, c, _vel, r, _armed) in &combatants {
                 if t == p.team {
                     continue;
                 }
@@ -1302,7 +1307,7 @@ impl World {
             }
             if let Some(id) = best_id {
                 let impact = a.lerp(b, best_t);
-                damage.push((id, p.damage, (-p.vel).normalize_or_zero(), impact));
+                damage.push((id, p.owner, p.damage, (-p.vel).normalize_or_zero(), impact));
             } else if p.life > 0.0 {
                 surviving.push(p);
             }
@@ -1311,8 +1316,36 @@ impl World {
         // Apply hits in order: the shield absorbs first (strongest on the front,
         // weakest on the rear), the rest hits the hull; any hit pauses regen and
         // emits an impact effect (blue if the shield absorbed any, else orange).
-        for (id, dmg, hit_from, impact) in damage {
-            if let Some(e) = self.entity_mut(id) {
+        // A non-combat (unarmed or Passive) victim flees toward the nearest armed
+        // ally; an armed combat ship without a commanded target retaliates by
+        // locking the attacker as its `attack_target`.
+        for (target_id, attacker_id, dmg, hit_from, impact) in damage {
+            // Precompute everything that needs the snapshot, since `entity_mut`
+            // below takes an exclusive borrow on `self.entities`.
+            let Some((_, vteam, vpos, _, _, varmed)) =
+                combatants.iter().find(|c| c.0 == target_id).copied()
+            else {
+                continue;
+            };
+            let attacker = combatants.iter().find(|c| c.0 == attacker_id).copied();
+            let flee_to: Option<Vec3> = if varmed {
+                None
+            } else {
+                let mut best_d2 = f32::INFINITY;
+                let mut best: Option<Vec3> = None;
+                for &(cid, ct, cp, _, _, ca) in &combatants {
+                    if cid == target_id || ct != vteam || !ca {
+                        continue;
+                    }
+                    let d2 = (cp - vpos).length_squared();
+                    if d2 < best_d2 {
+                        best_d2 = d2;
+                        best = Some(cp);
+                    }
+                }
+                best
+            };
+            if let Some(e) = self.entity_mut(target_id) {
                 let facing = hit_from.dot(e.transform.rot * Vec3::Z);
                 let (shield, hull) = apply_hit(e.shield, e.hull, dmg, facing);
                 let shielded = shield < e.shield;
@@ -1323,6 +1356,17 @@ impl World {
                 e.shield = shield;
                 e.hull = hull;
                 e.shield_regen_cooldown = SHIELD_REGEN_DELAY;
+                if !varmed || e.stance == Stance::Passive {
+                    if let Some(p) = flee_to {
+                        e.order = Some(p);
+                    }
+                } else if e.attack_target.is_none() {
+                    if let Some((aid, ateam, _, _, _, _)) = attacker {
+                        if ateam != e.ship.team {
+                            e.attack_target = Some(aid);
+                        }
+                    }
+                }
             }
         }
         // Despawn destroyed ships; `retain` keeps the survivors in spawn order.
@@ -1980,6 +2024,51 @@ mod tests {
         assert!(
             moved > 2.0 || killed,
             "aggressive should close on (or destroy) an out-of-range hostile: moved {moved}, killed {killed}",
+        );
+    }
+
+    #[test]
+    fn non_combat_flees_toward_armed_ally_on_hit() {
+        let mut w = World::new(41);
+        let v = w.spawn_class(ShipClass::Resourcer, Team::Player, Vec3::ZERO);
+        // Armed escort sits on +z; an enemy on -x opens fire.
+        w.spawn_class(
+            ShipClass::FrigateGeneral,
+            Team::Player,
+            Vec3::new(0.0, 0.0, 10.0),
+        );
+        w.spawn_class(ShipClass::Fighter, Team::Enemy, Vec3::new(-12.0, 0.0, 0.0));
+        let start_z = w.entity(v).unwrap().transform.pos.z;
+        for _ in 0..(TICK_HZ * 4) {
+            w.step(TICK_DT);
+        }
+        let ve = w.entity(v).expect("resourcer should survive");
+        assert!(
+            ve.transform.pos.z > start_z + 1.0,
+            "resourcer should flee toward the +z escort: {} -> {}",
+            start_z,
+            ve.transform.pos.z
+        );
+    }
+
+    #[test]
+    fn defensive_retaliates_against_attacker() {
+        let mut w = World::new(43);
+        let v = w.spawn_class(ShipClass::Corvette, Team::Player, Vec3::ZERO);
+        let atk = w.spawn_class(ShipClass::Fighter, Team::Enemy, Vec3::new(15.0, 0.0, 0.0));
+        let mut retaliated = false;
+        for _ in 0..(TICK_HZ * 2) {
+            w.step(TICK_DT);
+            if let Some(ve) = w.entity(v) {
+                if ve.attack_target == Some(atk) {
+                    retaliated = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            retaliated,
+            "defensive corvette should retaliate against its attacker"
         );
     }
 
