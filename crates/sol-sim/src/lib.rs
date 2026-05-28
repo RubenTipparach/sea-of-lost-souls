@@ -108,6 +108,7 @@ pub enum ShipClass {
     Fighter,
     Bomber,
     Corvette,
+    Salvager,
     Resourcer,
     FrigateGeneral,
     FrigateMissile,
@@ -117,10 +118,11 @@ pub enum ShipClass {
 
 impl ShipClass {
     /// All classes in a fixed order (stable iteration for registry building).
-    pub const ALL: [ShipClass; 8] = [
+    pub const ALL: [ShipClass; 9] = [
         ShipClass::Fighter,
         ShipClass::Bomber,
         ShipClass::Corvette,
+        ShipClass::Salvager,
         ShipClass::Resourcer,
         ShipClass::FrigateGeneral,
         ShipClass::FrigateMissile,
@@ -134,6 +136,7 @@ impl ShipClass {
             ShipClass::Fighter => "fighter",
             ShipClass::Bomber => "bomber",
             ShipClass::Corvette => "corvette",
+            ShipClass::Salvager => "salvager",
             ShipClass::Resourcer => "resourcer",
             ShipClass::FrigateGeneral => "frigate_general",
             ShipClass::FrigateMissile => "frigate_missile",
@@ -207,6 +210,9 @@ fn weapon_for(class: ShipClass) -> Option<Weapon> {
         ShipClass::Fighter => w(WeaponKind::Ballistic, 22.0, 6.0, 90.0, 0.18, 0.0, 0.4),
         ShipClass::Bomber => w(WeaponKind::Bomb, 16.0, 60.0, 45.0, 2.2, 0.0, 1.0),
         ShipClass::Corvette => w(WeaponKind::Ballistic, 26.0, 10.0, 85.0, 0.5, 0.0, 0.5),
+        // Salvager is unarmed in code today; the disabler beam + tow rig
+        // (design.md section 5) will land with the capture mechanic.
+        ShipClass::Salvager => None,
         ShipClass::Resourcer => None,
         ShipClass::FrigateGeneral => w(WeaponKind::Ballistic, 38.0, 18.0, 80.0, 0.9, 0.0, 0.6),
         ShipClass::FrigateMissile => w(WeaponKind::Missile, 55.0, 45.0, 38.0, 2.6, 70.0, 0.8),
@@ -280,6 +286,8 @@ fn shield_for(class: ShipClass) -> (f32, f32) {
     let max = match class {
         ShipClass::Fighter | ShipClass::Bomber => 0.0,
         ShipClass::Corvette => 40.0,
+        // Salvager: corvette-tier shield so it can survive a capture run.
+        ShipClass::Salvager => 60.0,
         ShipClass::Resourcer => 30.0,
         ShipClass::FrigateGeneral => 300.0,
         ShipClass::FrigateMissile => 280.0,
@@ -305,7 +313,7 @@ impl ShipRegistry {
         // radius drives separation and picking; crew/cost/build come from the
         // per-class match below.
         type Row = (ShipClass, f32, f32, f32, f32, f32, f32, f32);
-        let rows: [Row; 8] = [
+        let rows: [Row; 9] = [
             (ShipClass::Fighter, 18.0, 16.0, 24.0, 130.0, 1.0, 80.0, 0.0),
             (ShipClass::Bomber, 30.0, 12.0, 16.0, 90.0, 1.5, 120.0, 0.0),
             (
@@ -318,6 +326,9 @@ impl ShipRegistry {
                 400.0,
                 0.0,
             ),
+            // Salvager: slightly larger than a corvette, slower, tougher hull,
+            // unarmed. The disabler/tow rig comes with the capture mechanic.
+            (ShipClass::Salvager, 260.0, 9.0, 10.0, 60.0, 2.5, 500.0, 0.0),
             (
                 ShipClass::Resourcer,
                 140.0,
@@ -379,6 +390,7 @@ impl ShipRegistry {
                 ShipClass::Fighter => (1, 30.0, 4.0, 30.0),
                 ShipClass::Bomber => (2, 50.0, 6.0, 28.0),
                 ShipClass::Corvette => (10, 120.0, 8.0, 40.0),
+                ShipClass::Salvager => (12, 180.0, 10.0, 50.0),
                 ShipClass::Resourcer => (3, 80.0, 7.0, 35.0),
                 ShipClass::FrigateGeneral => (100, 300.0, 16.0, 55.0),
                 ShipClass::FrigateMissile => (100, 340.0, 18.0, 60.0),
@@ -765,10 +777,12 @@ impl World {
             target: None,
             attack_target: None,
             weapon_cooldown: 0.0,
-            // Motherships and harvesters default to Passive so they never go off
-            // to hunt; the commander AI / SOS / explicit orders move them.
+            // Motherships, harvesters, and salvagers default to Passive so they
+            // never go off to hunt; the commander AI / SOS / explicit orders
+            // move them, and salvagers approach disabled targets to capture them
+            // rather than picking a fight.
             stance: match ship.class {
-                ShipClass::Carrier | ShipClass::Resourcer => Stance::Passive,
+                ShipClass::Carrier | ShipClass::Resourcer | ShipClass::Salvager => Stance::Passive,
                 _ => Stance::Defensive,
             },
             anchor: Some(transform.pos),

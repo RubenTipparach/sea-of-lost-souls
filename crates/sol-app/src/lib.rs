@@ -1151,6 +1151,7 @@ fn class_depth_rank(class: ShipClass) -> u8 {
         ShipClass::Corvette => 4,
         ShipClass::Bomber => 5,
         ShipClass::Fighter => 6,
+        ShipClass::Salvager => 7,
         ShipClass::Resourcer => 9,
     }
 }
@@ -1696,7 +1697,7 @@ impl App {
                 ShipClass::FrigateGeneral | ShipClass::FrigateMissile => {
                     paired_column(&mut sides, 1)
                 }
-                ShipClass::Corvette => paired_column(&mut sides, 2),
+                ShipClass::Corvette | ShipClass::Salvager => paired_column(&mut sides, 2),
                 ShipClass::Fighter | ShipClass::Bomber => paired_column(&mut sides, 3),
             };
             by_col.entry(col).or_default().push((id, class));
@@ -2171,6 +2172,7 @@ fn class_scale(class: ShipClass) -> f32 {
         ShipClass::Fighter => 0.4,
         ShipClass::Bomber => 0.6,
         ShipClass::Corvette => 0.9,
+        ShipClass::Salvager => 1.0,
         ShipClass::Resourcer => 1.0,
         ShipClass::FrigateGeneral => 1.7,
         ShipClass::FrigateMissile => 1.8,
@@ -2255,7 +2257,7 @@ fn projectile_style(kind: WeaponKind) -> ([f32; 3], f32) {
 fn explosion_scale(class: ShipClass) -> f32 {
     match class {
         ShipClass::Fighter | ShipClass::Bomber => 1.4,
-        ShipClass::Corvette | ShipClass::Resourcer => 2.4,
+        ShipClass::Corvette | ShipClass::Resourcer | ShipClass::Salvager => 2.4,
         ShipClass::FrigateGeneral | ShipClass::FrigateMissile => 4.0,
         ShipClass::CapitalDestroyer => 6.0,
         ShipClass::Carrier => 8.0,
@@ -2275,7 +2277,7 @@ fn blip_size(class: ShipClass) -> f32 {
         ShipClass::Fighter => 1.2,
         ShipClass::Bomber => 1.5,
         ShipClass::Resourcer => 1.8,
-        ShipClass::Corvette => 2.1,
+        ShipClass::Corvette | ShipClass::Salvager => 2.1,
         ShipClass::FrigateGeneral | ShipClass::FrigateMissile => 2.9,
         ShipClass::CapitalDestroyer | ShipClass::Carrier => 3.6,
     }
@@ -2544,6 +2546,9 @@ fn class_glb_bytes(class: ShipClass) -> &'static [u8] {
         ShipClass::Fighter => include_bytes!("../../../assets/ships/fighter/model.glb"),
         ShipClass::Bomber => include_bytes!("../../../assets/ships/bomber/model.glb"),
         ShipClass::Corvette => include_bytes!("../../../assets/ships/corvette/model.glb"),
+        // Placeholder: re-use the resourcer hull until the salvager's own model
+        // (with the disabler beam emitter + tow rig) is authored.
+        ShipClass::Salvager => include_bytes!("../../../assets/ships/resourcer/model.glb"),
         ShipClass::Resourcer => include_bytes!("../../../assets/ships/resourcer/model.glb"),
         ShipClass::FrigateGeneral => {
             include_bytes!("../../../assets/ships/frigate_general/model.glb")
@@ -2760,6 +2765,7 @@ fn class_label(class: ShipClass) -> &'static str {
         ShipClass::Fighter => "Fighter",
         ShipClass::Bomber => "Bomber",
         ShipClass::Corvette => "Corvette",
+        ShipClass::Salvager => "Salvager",
         ShipClass::Resourcer => "Resourcer",
         ShipClass::FrigateGeneral => "Frigate",
         ShipClass::FrigateMissile => "Missile Frigate",
@@ -2771,10 +2777,11 @@ fn class_label(class: ShipClass) -> &'static str {
 /// Build-menu button ids paired with the class they queue. Shared by the click
 /// wiring and the per-frame affordability gating.
 #[cfg(target_arch = "wasm32")]
-const BUILD_BUTTONS: [(&str, ShipClass); 7] = [
+const BUILD_BUTTONS: [(&str, ShipClass); 8] = [
     ("sol-build-fighter", ShipClass::Fighter),
     ("sol-build-bomber", ShipClass::Bomber),
     ("sol-build-corvette", ShipClass::Corvette),
+    ("sol-build-salvager", ShipClass::Salvager),
     ("sol-build-resourcer", ShipClass::Resourcer),
     ("sol-build-frigate_general", ShipClass::FrigateGeneral),
     ("sol-build-frigate_missile", ShipClass::FrigateMissile),

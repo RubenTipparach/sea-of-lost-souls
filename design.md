@@ -58,7 +58,7 @@ technologies you pry from the dead.
 | **Space is a 3D place, not a plane** | Full volumetric movement, the famous Homeworld move-disk, attacks from above/below. | 2D-on-a-plane RTS with a fixed top-down camera. |
 | **You command, you don't pilot** | The player is fleet intelligence; the camera is its sensorium. Orders, not twitch. | Direct flight-sim piloting of a single ship. |
 | **The universe pushes back** | Environments are simulated and reactive - they respond to your tactics and become hazards or tools. | Static skyboxes and inert "decoration" hazards. |
-| **Salvage over manufacture** | Capturing and mastering enemy ships is the smart economy; building is the desperate one. Captured ships join your fleet without paying their full MU cost. | Pure factory economies with infinite reinforcements. |
+| **Salvage over manufacture** | Capturing and mastering enemy ships is the smart economy; building is the desperate one. **Salvagers** are the star: a tier-one specialist hull that disables, grapples, and drags enemy ships home. Captured hulls can be acclimated and crewed, or **liquidated** for **research points** that unlock advanced frigates and capitals. | Pure factory economies with infinite reinforcements. |
 | **Web-first, no install** | It runs in a browser tab at a URL, on every commit. | Desktop-only, heavyweight installers as the primary path. |
 
 ### Theme
@@ -153,7 +153,11 @@ Every tactical encounter (an "encounter node" in the run map) has:
   the base reward.
 - **Rewards** - **Matter Units** carried back to the Ark (the in-run currency,
   banked into the player's MU pool) and **research points** banked toward the
-  meta-progression tree (between runs).
+  meta-progression tree (between runs). Research points come from two sources:
+  the base + bonus objective payouts, and **liquidating** enemy ships captured
+  by **Salvagers** during the encounter ([§5](#5-crew-capture--research)). Cap-
+  turing more, and choosing which captures to liquidate vs keep, is the main
+  knob the player has on the research-point economy.
 
 Failing the main objective ends the encounter (and usually the run, when the
 Ark is the failed target).
@@ -255,29 +259,51 @@ requires none (it provides). A build is allowed only when both matter **and**
 free crew of the right kind suffice; queued builds reserve their crew up front so
 production can't over-commit the roster.
 
-### Capturing a ship
+### Capturing a ship (the Salvager loop)
+
+**Salvagers are the keystone class** of the game's economy. They are unarmed
+utility hulls unlocked right after Corvettes, slow but tough, equipped with a
+**disabler beam** (drops shields and suppresses engines/weapons without doing
+hull damage) and a **grapple/tow rig**. The player uses salvagers to capture
+enemy ships *before* the rest of the fleet kills them, turning combat into a
+resource-extraction exercise.
 
 ```mermaid
 flowchart TD
-    A[Target enemy ship] --> B[Disable it: knock out engines + weapons,<br/>or deplete/suppress its crew]
-    B --> C[Send boarding frigate / marine pods]
-    C --> D[Boarding action: attacker crew vs defender crew<br/>resolved over time inside the hull]
-    D -->|attacker wins| E[Ship captured - but UNFAMILIAR]
-    D -->|defender wins / scuttle| F[Boarding fails, crew lost]
-    E --> G[Operates at reduced capability:<br/>locked subsystems, lower efficiency]
-    G --> H[Crew acclimation + research unlocks potential]
+    A[Target enemy ship] --> B[Soften it: drop shields, suppress weapons]
+    B --> C[Salvager moves in, fires disabler beam]
+    C --> D[Disabler depletes the target's engines + weapons + crew]
+    D --> E[Salvager grapples and tows the dead hull back to the Ark]
+    E --> F{Player chooses}
+    F -->|Keep| G[Acclimate + crew it: enters your fleet at reduced capability]
+    F -->|Liquidate| H[Strip for research points spent in the tech tree]
 ```
 
-A freshly captured alien ship is **not** immediately a full asset:
+The salvager itself is **unarmed and fragile under fire**: it needs the rest of
+the fleet to suppress threats while it does its work. A salvager dying with a
+half-towed hull loses both. This pressure is what turns every encounter into a
+small tactical puzzle: which enemy ships are worth the salvage risk, and which
+do you just kill?
 
-- **Unfamiliarity penalty:** unknown subsystems are locked or run at reduced
-  efficiency; exotic weapons may be unusable until understood.
-- **Acclimation:** assigned crew gain proficiency over time aboard the ship,
-  and through **research** ([Intel](#3-core-loop--roguelike-campaign) spent at
-  the Ark).
-- **Mastery:** with enough proficiency + the right research-tree branch
-  unlocked, the ship reaches full potential - sometimes exceeding anything you
+Once an enemy hull is towed home, the player makes the **keep-or-liquidate**
+decision per ship:
+
+- **Keep.** The hull enters your fleet but is **unfamiliar**: unknown
+  subsystems locked or running at reduced efficiency; exotic weapons may be
+  unusable until understood. Assigned crew **acclimate** over time aboard, and
+  through targeted **research**. With enough proficiency + the right branch
+  unlocked, the ship reaches full potential, sometimes exceeding anything you
   could build.
+- **Liquidate.** The hull is broken down into **research points** at the Ark.
+  Bigger and rarer hulls yield more points: roughly a frigate is worth more
+  than a corvette is worth more than a fighter, with alien tech multipliers on
+  top. Research points are then spent in the tech tree to unlock **advanced
+  frigates and capital ships**, doctrines, and Ark modules.
+
+> Design tension: the best captures are also the best to keep. Liquidating is
+> a *concession* (you couldn't field this hull anyway, or you need the tier
+> unlock more than the asset). The player constantly trades off "field it now"
+> vs "unlock something better later."
 
 ### Research tree (branches)
 
@@ -313,10 +339,17 @@ Indicative unlock chain (subject to balance):
 | Start | **Mothership**, **Harvester**, **Fighter** | generalist baseline; the run viable but vanilla |
 | 1 | **Bomber** | heavy unguided ordnance against capital-grade hulls |
 | 1 | **Corvette** | tougher gun line for swarms of enemy strike craft |
+| 1 | **Salvager** | the keystone unlock: capture enemy hulls for keep-or-liquidate; converts kills into research points |
 | 2 | **Missile frigate** | long-range standoff and homing kills on capitals |
 | 2 | **General frigate** | line ship, screening, anti-frigate work |
 | 3 | **Capital destroyer** | big-gun anchor for mothership engagements |
 | 3 | **Xenotech doctrines** | crew enough captured alien ships to use them |
+
+Tier-2 and tier-3 unlocks (the frigates, capital, and doctrines) lean heavily
+on **liquidated research points**, so the Salvager is the gateway the player
+must pass through to reach the rest of the tree at any pace. Skipping
+Salvagers is possible but punishes the player with a much slower meta-loop
+fueled only by base mission rewards.
 
 Each tier becomes accessible once enough research points have been banked; the
 player chooses the *order* of unlocks (Bomber-first vs Corvette-first changes
@@ -1586,8 +1619,10 @@ complete.
 |---|---|
 | **Ark** | The mothership; command/production/research anchor of a run. Its loss ends the run. |
 | **MU / Matter Units** | The in-run resource currency, mined from asteroid fields by harvesters and spent on builds at the Ark. |
-| **Research points** | Meta-progression currency awarded by missions (main + bonus objectives); spent between runs in the research tree. |
+| **Research points** | Meta-progression currency. Awarded by missions (main + bonus objectives) **and by liquidating captured ships**; spent between runs in the research tree. |
 | **Mission** | A single tactical encounter with a **main objective** (default: destroy enemy mothership) and an optional **bonus objective** that pays extra research points. |
+| **Salvager** | Unarmed utility hull unlocked at tier 1, after Corvettes. Disables and tows enemy ships back to the Ark for the **keep-or-liquidate** decision. The star class of the game's economy. |
+| **Liquidation** | Stripping a captured enemy hull at the Ark to convert it into research points (vs keeping it, acclimating crew, and adding it to the fleet). |
 | **Move-disk** | Homeworld-style 3D move tool: set X/Z on a plane, drag vertically for altitude. |
 | **Sensors view** | Far-zoom abstracted tactical representation of the battlespace. |
 | **Lockstep** | Multiplayer model where all peers deterministically simulate the same state from shared commands. |
