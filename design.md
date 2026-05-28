@@ -762,9 +762,24 @@ one solid translucent color instead of stacking alpha. Ships collapse into
 **blips** the way the Homeworld sensors manager does: strike craft and frigates
 become a team-colored blip sized by class (a ring at altitude plus a pole to the
 plane), while the **mothership and capital ships keep their model** as readable
-anchors. **Weapons are deliberately absent for now**: ballistics, bombs, and
-missiles are the next slice (see [§6.8](#68-ballistics--projectiles)); hull,
-teams, and sensor range are already in place as the foundation.
+anchors.
+
+**Combat (current build).** A first slice of [ballistics](#68-ballistics--projectiles)
+is in, all in the deterministic sim. Each armed class carries a `Weapon` (a
+`Blueprint` field) of one of three archetypes: **Ballistic** (fast unguided
+rounds), **Bomb** (slow, heavy, short-ranged, on bombers), and **Missile**
+(guided, homing with a turn limit, on missile frigates); resourcers and the
+carrier are unarmed. **Projectiles are entities** in `World` integrated at the
+fixed step: unguided shots fly on a deterministic **lead/intercept** solution,
+missiles steer toward their target, and hits use a **swept segment-vs-sphere**
+test (CCD, no tunneling). Every ship **auto-engages** the nearest hostile in
+weapon range and fires on cooldown; the enemy AI now closes to a weapon-range
+standoff instead of ramming. Impacts subtract flat **hull** damage and a ship at
+zero hull despawns. (Shields, hull sections, and positional/subsystem damage from
+[§6.3](#63-structure-hitboxes--positional-damage)/[§6.8](#68-ballistics--projectiles)
+are still deferred.) The renderer draws projectile tracers + glints and an
+expanding burst when a ship dies (both purely visual, read from sim state);
+health bars now appear over any damaged ship, not just selected ones.
 
 Because `WASD` pans here, the target table's `W/S/D` order keys (waypoint / stop /
 dock) are not yet bound; `Stop` and `Select All` move to `Shift+S` / `Shift+A`

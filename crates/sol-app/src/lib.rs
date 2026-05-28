@@ -15,7 +15,7 @@ use sol_render::{
 };
 #[cfg(target_arch = "wasm32")]
 use sol_sim::CrewKind;
-use sol_sim::{Command, EntityId, Patrol, ShipClass, Team, World};
+use sol_sim::{Command, EntityId, Patrol, ShipClass, Team, WeaponKind, World};
 
 /// Group-move arrangement applied by [`App::issue_move`]. Local UI state only
 /// (never enters the sim): it just maps a click to per-ship slot targets.
@@ -72,6 +72,19 @@ const SENSORS_VIEW_PITCH: f32 = 1.15;
 /// Sensor-field sphere fill (RGBA). A low alpha keeps it a slight, solid-reading
 /// translucent volume; depth write means overlaps do not stack.
 const SENSOR_FIELD_COLOR: [f32; 4] = [0.28, 0.58, 1.0, 0.16];
+/// How long a ship-death explosion VFX plays (seconds; visual only).
+const EXPLOSION_DURATION: f32 = 0.7;
+
+/// A transient ship-death explosion (visual only; never read by the sim). Emits
+/// an expanding additive particle burst from `pos` over [`EXPLOSION_DURATION`].
+#[derive(Clone, Copy)]
+struct Explosion {
+    pos: Vec3,
+    /// `App::elapsed` when the ship died.
+    start: f32,
+    /// Burst size, scaled from the destroyed ship's class.
+    scale: f32,
+}
 
 /// Build-overlay turntable: default pitch, auto-spin rate (rad/s), and the idle
 /// delay (s) after a manual drag before the spin resumes and the pitch eases
@@ -237,6 +250,11 @@ struct App {
     /// Wall-clock seconds since start, for purely visual animation (particles).
     /// Render-only; never read by the sim.
     elapsed: f32,
+    /// Active ship-death explosions (visual only; emitted into the particle pass).
+    explosions: Vec<Explosion>,
+    /// Last frame's entity positions/classes, used to detect deaths (an id that
+    /// vanished) and spawn an explosion at its last position. Render-only.
+    tracked: HashMap<EntityId, (Vec3, ShipClass)>,
     /// Locally-selected ships (UI state only; never enters the sim).
     selected: Vec<EntityId>,
     /// Active group-move arrangement (cycled with `F` / the HUD button).
@@ -310,6 +328,8 @@ impl App {
             last_frame: None,
             accumulator: 0.0,
             elapsed: 0.0,
+            explosions: Vec::new(),
+            tracked: HashMap::new(),
             selected: Vec::new(),
             formation: Formation::Parade,
             build_open: false,
@@ -645,14 +665,16 @@ impl App {
                 }
             }
 
-            // HUD bars above the ship: health (when selected) then a gold cargo /
-            // harvest bar (whenever a resourcer has an active gather task).
-            if selected || e.gather.is_some() {
+            // HUD bars above the ship (suppressed in the zoomed-out sensors view):
+            // health (when selected or damaged, so combat is legible) then a gold
+            // cargo / harvest bar (whenever a resourcer has an active gather task).
+            let max_hull = self.world.registry.get(e.ship.class).max_hull;
+            let hf = (e.hull / max_hull.max(1.0)).clamp(0.0, 1.0);
+            let damaged = hf < 0.999;
+            if !sensors && (selected || damaged || e.gather.is_some()) {
                 if let Some((sx, sy)) = self.project_to_screen(pos + Vec3::Y * (r * 0.8 + 1.2)) {
                     let mut row = sy;
-                    if selected {
-                        let max_hull = self.world.registry.get(e.ship.class).max_hull;
-                        let hf = (e.hull / max_hull.max(1.0)).clamp(0.0, 1.0);
+                    if selected || damaged {
                         let hc = [1.0 - hf, 0.25 + 0.7 * hf, 0.18, 0.95];
                         push_bar(
                             &mut overlay_tris,
@@ -750,6 +772,60 @@ impl App {
             // Texture supplies the rock color; tint only dims as the node empties.
             let v = 0.55 + 0.45 * frac;
             asteroid_instances.push(MeshInstance::with_tint(model, [v, v, v, 1.0]));
+        }
+
+        // Projectiles: a kind-colored tracer (the recent travel segment) plus an
+        // additive glow at the head. Drawn in both views so combat reads clearly.
+        for p in &self.world.projectiles {
+            let head = p.prev_pos.lerp(p.pos, alpha);
+            let (col, glow) = projectile_style(p.kind);
+            push_line(&mut gizmo_lines, p.prev_pos, head, col);
+            particles.push(StarInstance::new(head.to_array(), col, glow));
+        }
+
+        // Ship-death explosions: an entity that vanished since last frame was
+        // destroyed (only deaths despawn), so spawn a burst at its last position.
+        let current: HashMap<EntityId, (Vec3, ShipClass)> = self
+            .world
+            .entities
+            .iter()
+            .map(|e| (e.id, (e.transform.pos, e.ship.class)))
+            .collect();
+        let mut new_booms: Vec<Explosion> = Vec::new();
+        for (id, (dpos, class)) in &self.tracked {
+            if !current.contains_key(id) {
+                new_booms.push(Explosion {
+                    pos: *dpos,
+                    start: self.elapsed,
+                    scale: explosion_scale(*class),
+                });
+            }
+        }
+        self.explosions.extend(new_booms);
+        self.tracked = current;
+
+        // Emit each live explosion as an expanding additive shell that fades out.
+        let elapsed = self.elapsed;
+        self.explosions
+            .retain(|ex| elapsed - ex.start < EXPLOSION_DURATION);
+        for ex in &self.explosions {
+            let age = (elapsed - ex.start).max(0.0);
+            let t = age / EXPLOSION_DURATION;
+            let fade = (1.0 - t).clamp(0.0, 1.0);
+            let radius = ex.scale * (0.4 + 2.2 * t);
+            for k in 0..16u32 {
+                let kk = k as f32;
+                let a1 = kk * 2.399_963 + ex.start * 7.0;
+                let a2 = kk * 1.7 + ex.start * 3.0;
+                let dir = Vec3::new(a1.cos() * a2.sin(), a2.cos(), a1.sin() * a2.sin());
+                let p = ex.pos + dir * radius;
+                let c = fade * 0.9;
+                particles.push(StarInstance::new(
+                    p.to_array(),
+                    [c, c * 0.55, c * 0.22],
+                    0.006 + 0.02 * fade,
+                ));
+            }
         }
 
         // Band-select rectangle (desktop LMB drag or mobile box-select hold).
@@ -1900,6 +1976,26 @@ fn spawn_demo_fleet(world: &mut World) {
     ];
     for (class, pos) in enemy {
         world.spawn_class(class, Team::Enemy, pos);
+    }
+}
+
+/// Tracer color (linear RGB) and additive glow size for a projectile kind.
+fn projectile_style(kind: WeaponKind) -> ([f32; 3], f32) {
+    match kind {
+        WeaponKind::Ballistic => ([1.0, 0.92, 0.55], 0.006),
+        WeaponKind::Bomb => ([1.0, 0.55, 0.2], 0.013),
+        WeaponKind::Missile => ([1.0, 0.66, 0.3], 0.01),
+    }
+}
+
+/// Death-explosion burst size, scaled from the destroyed ship's class.
+fn explosion_scale(class: ShipClass) -> f32 {
+    match class {
+        ShipClass::Fighter | ShipClass::Bomber => 1.4,
+        ShipClass::Corvette | ShipClass::Resourcer => 2.4,
+        ShipClass::FrigateGeneral | ShipClass::FrigateMissile => 4.0,
+        ShipClass::CapitalDestroyer => 6.0,
+        ShipClass::Carrier => 8.0,
     }
 }
 

@@ -127,6 +127,62 @@ pub enum CrewKind {
     Pilots,
 }
 
+/// Weapon archetype (`design.md` §6.8). `Ballistic` and `Bomb` are unguided
+/// projectiles fired on a lead/intercept solution (the bomb is slow, heavy, and
+/// short ranged); `Missile` is a guided projectile that homes with a turn limit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WeaponKind {
+    Ballistic,
+    Bomb,
+    Missile,
+}
+
+/// A ship's weapon mount (one per armed class in this prototype; per-hardpoint
+/// loadouts land later). All numbers are deterministic, demo-tuned.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Weapon {
+    pub kind: WeaponKind,
+    /// Max engagement range (world units): acquire + fire within this.
+    pub range: f32,
+    /// Hull damage per hit.
+    pub damage: f32,
+    /// Projectile speed (world units/s).
+    pub speed: f32,
+    /// Seconds between shots.
+    pub cooldown: f32,
+    /// Homing turn rate (deg/s) for `Missile`; ignored by unguided kinds.
+    pub turn_rate_deg: f32,
+    /// Projectile hit radius (added to the target radius for the swept test).
+    pub proj_radius: f32,
+}
+
+/// Per-class weapon loadout. Returns `None` for unarmed classes (resourcer and
+/// the carrier, which the fleet protects). Demo-tuned; eventual values live in
+/// `ship.json`.
+fn weapon_for(class: ShipClass) -> Option<Weapon> {
+    let w = |kind, range, damage, speed, cooldown, turn_rate_deg, proj_radius| {
+        Some(Weapon {
+            kind,
+            range,
+            damage,
+            speed,
+            cooldown,
+            turn_rate_deg,
+            proj_radius,
+        })
+    };
+    match class {
+        ShipClass::Fighter => w(WeaponKind::Ballistic, 22.0, 6.0, 90.0, 0.18, 0.0, 0.4),
+        ShipClass::Bomber => w(WeaponKind::Bomb, 16.0, 60.0, 45.0, 2.2, 0.0, 1.0),
+        ShipClass::Corvette => w(WeaponKind::Ballistic, 26.0, 10.0, 85.0, 0.5, 0.0, 0.5),
+        ShipClass::Resourcer => None,
+        ShipClass::FrigateGeneral => w(WeaponKind::Ballistic, 38.0, 18.0, 80.0, 0.9, 0.0, 0.6),
+        ShipClass::FrigateMissile => w(WeaponKind::Missile, 55.0, 45.0, 38.0, 2.6, 70.0, 0.8),
+        ShipClass::CapitalDestroyer => w(WeaponKind::Ballistic, 50.0, 40.0, 70.0, 1.4, 0.0, 0.9),
+        ShipClass::Carrier => None,
+    }
+}
+
 /// Static, per-class stats loaded once into the [`ShipRegistry`]. These are the
 /// gameplay numbers the schema carries in `ship.json` (mobility + build); the
 /// steering sim (Stage 7) reads `max_speed`/`accel`/`turn_rate_deg`.
@@ -154,6 +210,8 @@ pub struct Blueprint {
     /// Sensor range (world units): how far this ship detects other teams.
     /// Drives enemy AI target acquisition and the sensors-manager fog of war.
     pub sensor_range: f32,
+    /// Weapon mount, or `None` for unarmed classes (resourcer, carrier).
+    pub weapon: Option<Weapon>,
 }
 
 /// Read-only table of per-class blueprints. Lookups are by key (deterministic);
@@ -266,6 +324,7 @@ impl ShipRegistry {
                     cost,
                     build_time,
                     sensor_range,
+                    weapon: weapon_for(class),
                 },
             );
         }
@@ -380,6 +439,37 @@ pub struct Entity {
     pub patrol: Option<Patrol>,
     /// Active gather task (resourcers only); overrides move orders/patrol.
     pub gather: Option<Gather>,
+    /// Current combat target (auto-acquired nearest hostile in weapon range).
+    pub target: Option<EntityId>,
+    /// Seconds until this ship's weapon can fire again.
+    pub weapon_cooldown: f32,
+}
+
+/// Stable id for an in-flight projectile (incrementing; transient lifetime).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ProjectileId(pub u32);
+
+/// A projectile in flight: a `sol-sim` entity with position + velocity,
+/// integrated at the fixed timestep (`design.md` §6.8). Unguided kinds fly
+/// straight; `Missile` homes toward `target` with a turn limit. `prev_pos` lets
+/// the renderer draw an interpolated tracer; the sim hit-tests the swept segment.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Projectile {
+    pub id: ProjectileId,
+    pub kind: WeaponKind,
+    /// Owning team; a projectile only damages other teams.
+    pub team: Team,
+    pub pos: Vec3,
+    pub prev_pos: Vec3,
+    pub vel: Vec3,
+    /// Homing target for `Missile` (ignored by unguided kinds).
+    pub target: Option<EntityId>,
+    pub damage: f32,
+    pub speed: f32,
+    pub turn_rate_deg: f32,
+    pub radius: f32,
+    /// Remaining lifetime (s); the projectile despawns at zero.
+    pub life: f32,
 }
 
 /// A player/AI order. Orders are queued and applied at fixed-step boundaries
@@ -409,6 +499,8 @@ pub enum Command {
 #[derive(Clone, Debug)]
 pub struct World {
     pub entities: Vec<Entity>,
+    /// In-flight projectiles (transient combat entities; `design.md` §6.8).
+    pub projectiles: Vec<Projectile>,
     /// Harvestable salvage sites (asteroids); drained by resourcers.
     pub resource_nodes: Vec<ResourceNode>,
     /// Salvage banked at the mothership (the player's resource pool).
@@ -421,6 +513,7 @@ pub struct World {
     pub tick: u64,
     next_id: u32,
     next_node_id: u32,
+    next_projectile_id: u32,
     /// Orders accumulated since the last step, drained at the next step.
     pending: Vec<Command>,
 }
@@ -430,6 +523,7 @@ impl World {
     pub fn new(seed: u64) -> Self {
         Self {
             entities: Vec::new(),
+            projectiles: Vec::new(),
             resource_nodes: Vec::new(),
             salvage: 0.0,
             build_queue: Vec::new(),
@@ -438,6 +532,7 @@ impl World {
             tick: 0,
             next_id: 0,
             next_node_id: 0,
+            next_projectile_id: 0,
             pending: Vec::new(),
         }
     }
@@ -530,6 +625,8 @@ impl World {
             order: None,
             patrol: None,
             gather: None,
+            target: None,
+            weapon_cooldown: 0.0,
         });
         id
     }
@@ -678,8 +775,8 @@ impl World {
                 if e.ship.team != Team::Enemy {
                     continue;
                 }
-                let range = self.registry.get(e.ship.class).sensor_range;
-                let max_d2 = range * range;
+                let bp = self.registry.get(e.ship.class);
+                let max_d2 = bp.sensor_range * bp.sensor_range;
                 let my = e.transform.pos;
                 let mut best_d2 = f32::INFINITY;
                 let mut best: Option<Vec3> = None;
@@ -690,7 +787,21 @@ impl World {
                         best = Some(p);
                     }
                 }
-                e.order = best.or(rally);
+                // Armed enemies close to a weapon-range standoff and hold there to
+                // fire; unarmed ones (none in the demo) advance onto the contact.
+                let goal = best.map(|p| match bp.weapon {
+                    Some(w) => {
+                        let to = my - p;
+                        let d = to.length();
+                        if d > 1e-3 {
+                            p + to / d * (w.range * 0.7)
+                        } else {
+                            p
+                        }
+                    }
+                    None => p,
+                });
+                e.order = goal.or(rally);
             }
         }
 
@@ -796,6 +907,140 @@ impl World {
                 );
             }
         }
+
+        // 3c) Combat (design.md §6.8). Auto-engage: every armed ship locks the
+        // nearest hostile in weapon range and fires on cooldown; projectiles are
+        // entities integrated below. Deterministic: a positions snapshot taken
+        // before firing, stable id-order iteration, seeded math, no wall-clock.
+        let combatants: Vec<(EntityId, Team, Vec3, Vec3, f32)> = self
+            .entities
+            .iter()
+            .map(|e| {
+                (
+                    e.id,
+                    e.ship.team,
+                    e.transform.pos,
+                    e.velocity.linear,
+                    self.registry.get(e.ship.class).radius,
+                )
+            })
+            .collect();
+
+        // Firing pass: tick cooldowns, (re)acquire targets, emit new projectiles.
+        let mut new_projectiles: Vec<Projectile> = Vec::new();
+        let mut next_pid = self.next_projectile_id;
+        for e in &mut self.entities {
+            let Some(weapon) = self.registry.get(e.ship.class).weapon else {
+                e.target = None;
+                continue;
+            };
+            e.weapon_cooldown = (e.weapon_cooldown - dt).max(0.0);
+            let team = e.ship.team;
+            let my_id = e.id;
+            let my_pos = e.transform.pos;
+            let max_d2 = weapon.range * weapon.range;
+            // Keep the current target if it is still hostile, alive, and in range;
+            // otherwise acquire the nearest hostile (stable id order breaks ties).
+            let mut target: Option<(EntityId, Vec3, Vec3)> = e.target.and_then(|id| {
+                combatants
+                    .iter()
+                    .find(|c| c.0 == id && c.1 != team && (c.2 - my_pos).length_squared() <= max_d2)
+                    .map(|c| (c.0, c.2, c.3))
+            });
+            if target.is_none() {
+                let mut best_d2 = f32::INFINITY;
+                for &(id, t, pos, vel, _r) in &combatants {
+                    if t == team || id == my_id {
+                        continue;
+                    }
+                    let d2 = (pos - my_pos).length_squared();
+                    if d2 <= max_d2 && d2 < best_d2 {
+                        best_d2 = d2;
+                        target = Some((id, pos, vel));
+                    }
+                }
+            }
+            e.target = target.map(|(id, _, _)| id);
+            if let (true, Some((tid, tpos, tvel))) = (e.weapon_cooldown <= 0.0, target) {
+                let dir = if weapon.kind == WeaponKind::Missile {
+                    (tpos - my_pos).normalize_or_zero()
+                } else {
+                    intercept_dir(my_pos, tpos, tvel, weapon.speed)
+                };
+                if dir != Vec3::ZERO {
+                    new_projectiles.push(Projectile {
+                        id: ProjectileId(next_pid),
+                        kind: weapon.kind,
+                        team,
+                        pos: my_pos,
+                        prev_pos: my_pos,
+                        vel: dir * weapon.speed,
+                        target: (weapon.kind == WeaponKind::Missile).then_some(tid),
+                        damage: weapon.damage,
+                        speed: weapon.speed,
+                        turn_rate_deg: weapon.turn_rate_deg,
+                        radius: weapon.proj_radius,
+                        life: weapon.range / weapon.speed * 1.4 + 0.3,
+                    });
+                    next_pid += 1;
+                    e.weapon_cooldown = weapon.cooldown;
+                }
+            }
+        }
+        self.next_projectile_id = next_pid;
+
+        // Projectile pass: home (missiles), integrate, swept hit-test against
+        // hostile ships, then apply damage. Newly fired shots are appended after,
+        // so they wait one step before moving (no instant-hit at the muzzle).
+        let mut damage: Vec<(EntityId, f32)> = Vec::new();
+        let mut surviving: Vec<Projectile> = Vec::with_capacity(self.projectiles.len());
+        for mut p in std::mem::take(&mut self.projectiles) {
+            p.prev_pos = p.pos;
+            if p.kind == WeaponKind::Missile {
+                if let Some(c) = p
+                    .target
+                    .and_then(|tid| combatants.iter().find(|c| c.0 == tid))
+                {
+                    let desired = (c.2 - p.pos).normalize_or_zero() * p.speed;
+                    if desired != Vec3::ZERO {
+                        let max_turn = p.turn_rate_deg.to_radians() * dt;
+                        p.vel = steer_velocity(p.vel, desired, max_turn, p.speed);
+                    }
+                }
+            }
+            let a = p.pos;
+            p.pos += p.vel * dt;
+            let b = p.pos;
+            p.life -= dt;
+            // Earliest hostile hit along the swept segment (CCD; no tunneling).
+            let mut best_t = f32::INFINITY;
+            let mut best_id: Option<EntityId> = None;
+            for &(id, t, c, _vel, r) in &combatants {
+                if t == p.team {
+                    continue;
+                }
+                if let Some(hit_t) = segment_sphere_t(a, b, c, r + p.radius) {
+                    if hit_t < best_t {
+                        best_t = hit_t;
+                        best_id = Some(id);
+                    }
+                }
+            }
+            if let Some(id) = best_id {
+                damage.push((id, p.damage));
+            } else if p.life > 0.0 {
+                surviving.push(p);
+            }
+        }
+        self.projectiles = surviving;
+        for (id, dmg) in damage {
+            if let Some(e) = self.entity_mut(id) {
+                e.hull -= dmg;
+            }
+        }
+        // Despawn destroyed ships; `retain` keeps the survivors in spawn order.
+        self.entities.retain(|e| e.hull > 0.0);
+        self.projectiles.append(&mut new_projectiles);
 
         // 4) Resource harvest / deposit, in a separate pass so the node list and
         // the salvage pool aren't aliased with the entity iteration. Stable
@@ -910,6 +1155,12 @@ impl World {
             h = fnv1a(h, b.class as u32);
             h = fnv1a(h, b.progress.to_bits());
         }
+        for p in &self.projectiles {
+            h = fnv1a(h, p.id.0);
+            for v in [p.pos.x, p.pos.y, p.pos.z] {
+                h = fnv1a(h, v.to_bits());
+            }
+        }
         h
     }
 }
@@ -917,6 +1168,90 @@ impl World {
 /// One FNV-1a round over a 32-bit word.
 fn fnv1a(h: u64, x: u32) -> u64 {
     (h ^ x as u64).wrapping_mul(0x0000_0100_0000_01b3)
+}
+
+/// Deterministic lead/intercept aim (`design.md` §6.8): direction a shot of
+/// `speed` should travel from `shooter` to hit a target at `tpos` moving at
+/// `tvel`. Solves `|tpos + tvel*t - shooter| = speed*t` for the earliest t >= 0;
+/// if the target outruns the round (no solution), aims at its current position.
+fn intercept_dir(shooter: Vec3, tpos: Vec3, tvel: Vec3, speed: f32) -> Vec3 {
+    let d = tpos - shooter;
+    let a = tvel.dot(tvel) - speed * speed;
+    let b = 2.0 * d.dot(tvel);
+    let c = d.dot(d);
+    let t = if a.abs() < 1e-4 {
+        // Target speed ~= projectile speed: the quadratic degenerates to linear.
+        if b.abs() < 1e-6 {
+            -1.0
+        } else {
+            -c / b
+        }
+    } else {
+        let disc = b * b - 4.0 * a * c;
+        if disc < 0.0 {
+            -1.0
+        } else {
+            let sq = disc.sqrt();
+            // Smallest positive root of a*t^2 + b*t + c = 0.
+            let t0 = (-b - sq) / (2.0 * a);
+            let t1 = (-b + sq) / (2.0 * a);
+            let lo = t0.min(t1);
+            let hi = t0.max(t1);
+            if lo > 0.0 {
+                lo
+            } else if hi > 0.0 {
+                hi
+            } else {
+                -1.0
+            }
+        }
+    };
+    let aim = if t > 0.0 { tpos + tvel * t } else { tpos };
+    (aim - shooter).normalize_or_zero()
+}
+
+/// Rotate the velocity `vel` toward `desired` by at most `max_turn` radians,
+/// keeping the magnitude `speed` (guided-missile steering with a turn limit).
+fn steer_velocity(vel: Vec3, desired: Vec3, max_turn: f32, speed: f32) -> Vec3 {
+    let cur = vel.normalize_or_zero();
+    let des = desired.normalize_or_zero();
+    if cur == Vec3::ZERO {
+        return des * speed;
+    }
+    let angle = cur.angle_between(des);
+    if angle <= max_turn || angle < 1e-5 {
+        return des * speed;
+    }
+    let axis = cur.cross(des);
+    let axis = if axis.length_squared() < 1e-8 {
+        cur.any_orthonormal_vector() // nearly anti-parallel: pick any perpendicular
+    } else {
+        axis.normalize()
+    };
+    (Quat::from_axis_angle(axis, max_turn) * cur) * speed
+}
+
+/// Earliest fraction t in `[0, 1]` at which the swept segment `a -> b` enters a
+/// sphere of radius `r` at `c`, or `None` if it never does. Used for CCD-style
+/// projectile hit detection (no tunneling).
+fn segment_sphere_t(a: Vec3, b: Vec3, c: Vec3, r: f32) -> Option<f32> {
+    let m = a - c;
+    let d = b - a;
+    let aa = d.dot(d);
+    if aa < 1e-12 {
+        return (m.dot(m) <= r * r).then_some(0.0);
+    }
+    let cc = m.dot(m) - r * r;
+    if cc <= 0.0 {
+        return Some(0.0); // started inside the sphere
+    }
+    let bb = 2.0 * m.dot(d);
+    let disc = bb * bb - 4.0 * aa * cc;
+    if disc < 0.0 {
+        return None;
+    }
+    let t = (-bb - disc.sqrt()) / (2.0 * aa);
+    (0.0..=1.0).contains(&t).then_some(t)
 }
 
 /// Rotate `from` toward `to` by at most `max_angle` radians (turn-rate clamp).
@@ -1132,6 +1467,75 @@ mod tests {
             end < start - 1.0,
             "enemy should advance on the mothership: {start} -> {end}"
         );
+    }
+
+    #[test]
+    fn ship_destroys_hostile_in_weapon_range() {
+        let mut w = World::new(11);
+        // Corvette (range 26, 10 dmg / 0.5s) vs an enemy fighter (80 hull) at 15.
+        w.spawn_class(ShipClass::Corvette, Team::Player, Vec3::ZERO);
+        let e = w.spawn_class(ShipClass::Fighter, Team::Enemy, Vec3::new(15.0, 0.0, 0.0));
+        let mut steps = 0;
+        while w.entity(e).is_some() && steps < TICK_HZ * 30 {
+            w.step(TICK_DT);
+            steps += 1;
+        }
+        assert!(
+            w.entity(e).is_none(),
+            "hostile in range should be destroyed"
+        );
+    }
+
+    #[test]
+    fn no_fire_out_of_weapon_range() {
+        let mut w = World::new(11);
+        w.spawn_class(ShipClass::Corvette, Team::Player, Vec3::ZERO);
+        // 200 away: beyond sensor and weapon range, with no mothership to rally on.
+        let e = w.spawn_class(ShipClass::Fighter, Team::Enemy, Vec3::new(200.0, 0.0, 0.0));
+        let hull0 = w.entity(e).unwrap().hull;
+        for _ in 0..(TICK_HZ * 3) {
+            w.step(TICK_DT);
+        }
+        assert!(w.projectiles.is_empty(), "nothing should fire out of range");
+        assert_eq!(w.entity(e).unwrap().hull, hull0, "no damage out of range");
+    }
+
+    #[test]
+    fn missile_frigate_destroys_target() {
+        let mut w = World::new(13);
+        w.spawn_class(ShipClass::FrigateMissile, Team::Player, Vec3::ZERO);
+        // Fighter at 40: inside the frigate's 55 range but outside the fighter's own
+        // 30 sensor range, so it sits while homing missiles (45 dmg) destroy it.
+        let e = w.spawn_class(ShipClass::Fighter, Team::Enemy, Vec3::new(40.0, 0.0, 0.0));
+        let mut steps = 0;
+        while w.entity(e).is_some() && steps < TICK_HZ * 30 {
+            w.step(TICK_DT);
+            steps += 1;
+        }
+        assert!(
+            w.entity(e).is_none(),
+            "homing missiles should destroy the target"
+        );
+    }
+
+    #[test]
+    fn combat_is_deterministic() {
+        let run = || {
+            let mut w = World::new(7);
+            w.spawn_class(ShipClass::Carrier, Team::Player, Vec3::ZERO);
+            w.spawn_class(ShipClass::Corvette, Team::Player, Vec3::new(8.0, 0.0, 0.0));
+            w.spawn_class(ShipClass::Fighter, Team::Enemy, Vec3::new(60.0, 0.0, 10.0));
+            w.spawn_class(
+                ShipClass::FrigateMissile,
+                Team::Enemy,
+                Vec3::new(-55.0, 0.0, -20.0),
+            );
+            for _ in 0..(TICK_HZ * 12) {
+                w.step(TICK_DT);
+            }
+            w.checksum()
+        };
+        assert_eq!(run(), run(), "combat must be bit-identical across runs");
     }
 
     #[test]
