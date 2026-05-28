@@ -296,6 +296,24 @@
       #sol-build-status {
         top: 64px;
       }
+      /* Pending decisions badge: appears when the salvager queue has any hulls
+         awaiting Keep/Liquidate. Top-left, under build-status. */
+      #sol-pending {
+        position: fixed;
+        left: 10px;
+        top: 102px;
+        z-index: 21;
+        background: rgba(43, 24, 70, 0.86);
+        border: 1px solid #a07be0;
+        border-radius: 8px;
+        color: #e3d3ff;
+        font: 700 13px/1 system-ui, sans-serif;
+        padding: 8px 10px;
+        pointer-events: none;
+      }
+      #sol-pending[hidden] {
+        display: none;
+      }
       /* Resource readout: banked matter, top-left. */
       #sol-resources {
         position: fixed;
@@ -459,6 +477,7 @@
       })();
     </script>
     <div id="sol-resources">MU: 0</div>
+    <div id="sol-pending" hidden></div>
     <div id="sol-crew"></div>
     <div id="sol-build-status"></div>
     <div id="sol-build-overlay" hidden>

@@ -288,6 +288,13 @@ pub const DISABLER_HULL_FLOOR: f32 = 0.05;
 /// disabling. Above this, the salvager holds fire so a fresh full-hull enemy
 /// isn't wasted on a weak disabler shot.
 pub const DISABLER_ENGAGE_HULL: f32 = 0.6;
+/// Extra padding (world units) beyond `salvager.radius + target.radius` within
+/// which a salvager grapples a disabled hostile and locks the tow.
+pub const TOW_GRAPPLE_PAD: f32 = 1.5;
+/// Padding for the "arrived at Ark" check that completes a tow.
+pub const TOW_ARRIVAL_PAD: f32 = 4.0;
+/// Multiplier on the salvager's max speed while it has a hull in tow.
+pub const TOW_SPEED_FACTOR: f32 = 0.5;
 
 /// Active enemy raid wave: a coordinated group of armed enemy ships focused on
 /// a single player target (the mothership for the prototype). The commander
@@ -297,6 +304,18 @@ pub const DISABLER_ENGAGE_HULL: f32 = 0.6;
 pub struct EnemyWave {
     pub target: EntityId,
     pub formed_tick: u64,
+}
+
+/// A disabled enemy hull that a salvager has successfully towed back to the
+/// Ark and parked in the **Pending decisions** queue, awaiting Keep or
+/// Liquidate ([design.md §5](#5-crew-capture--research)).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CapturedHull {
+    pub class: ShipClass,
+    /// The team this hull originally belonged to (Enemy, or a future alien
+    /// faction). Drives the alien-tech proficiency gate at decision time.
+    pub from_team: Team,
+    pub captured_tick: u64,
 }
 
 /// Per-class shield capacity and recharge rate (per second). Strike craft have
@@ -571,6 +590,13 @@ pub struct Entity {
     /// are skipped by auto-targeting / SOS / wave conscription, and are
     /// eligible to be towed by a friendly salvager.
     pub disabled: bool,
+    /// Salvager-only: id of the disabled hull this ship is currently towing.
+    /// While set, the salvager heads for the Ark at half speed and skips its
+    /// disabler firing pass.
+    pub towing: Option<EntityId>,
+    /// Disabled-target-only: id of the salvager that has us in tow. The towed
+    /// hull's position is snapped behind that salvager each step.
+    pub towed_by: Option<EntityId>,
 }
 
 /// Stable id for an in-flight projectile (incrementing; transient lifetime).
@@ -672,6 +698,9 @@ pub struct World {
     pub enemy_build_index: u32,
     /// Active enemy raid wave, if any (commander state).
     pub enemy_wave: Option<EnemyWave>,
+    /// Hulls towed back to the Ark and waiting on a Keep/Liquidate decision.
+    /// Survives across encounters until the player resolves each entry.
+    pub pending_captures: Vec<CapturedHull>,
     pub registry: ShipRegistry,
     pub rng: Rng,
     /// Number of fixed steps taken; part of the determinism checksum.
@@ -697,6 +726,7 @@ impl World {
             enemy_build_queue: Vec::new(),
             enemy_build_index: 0,
             enemy_wave: None,
+            pending_captures: Vec::new(),
             registry: ShipRegistry::with_defaults(),
             rng: Rng::new(seed),
             tick: 0,
@@ -813,6 +843,8 @@ impl World {
             },
             anchor: Some(transform.pos),
             disabled: false,
+            towing: None,
+            towed_by: None,
         });
         id
     }
@@ -862,6 +894,174 @@ impl World {
     ///
     /// Combat-ship movement is still driven by the per-ship enemy AI block
     /// (advance on the player mothership / standoff in sensor range).
+    /// Salvager tow loop. Runs each step:
+    ///   1. **Grapple.** Any salvager not currently towing locks the nearest
+    ///      disabled hostile within `grapple_range = radii + TOW_GRAPPLE_PAD`.
+    ///   2. **Track.** Each towed hull is snapped just behind its salvager so
+    ///      it visibly drags along at half speed (see the movement pass).
+    ///   3. **Arrive.** Any towing salvager within `TOW_ARRIVAL_PAD` of its
+    ///      team's mothership delivers the hull: the captured ship despawns,
+    ///      a `CapturedHull` is appended to `pending_captures`, and the
+    ///      salvager's `towing` field clears.
+    ///
+    /// Stale `towing` / `towed_by` references (peer died) are cleaned up at
+    /// the end so a single dead-id can't latch indefinitely.
+    fn step_tow_loop(&mut self) {
+        // Build a small immutable snapshot so the three sub-passes can read
+        // current state without re-borrowing self mid-mutation.
+        let depot: Option<(EntityId, Vec3, f32)> = self
+            .entities
+            .iter()
+            .find(|e| e.ship.class == ShipClass::Carrier && e.ship.team == Team::Player)
+            .map(|e| {
+                (
+                    e.id,
+                    e.transform.pos,
+                    self.registry.get(e.ship.class).radius,
+                )
+            });
+
+        // (id, class, team, pos, rot, radius, disabled, towed_by, towing)
+        type TowSnap = (
+            EntityId,
+            ShipClass,
+            Team,
+            Vec3,
+            Quat,
+            f32,
+            bool,
+            Option<EntityId>,
+            Option<EntityId>,
+        );
+        let snap: Vec<TowSnap> = self
+            .entities
+            .iter()
+            .map(|e| {
+                (
+                    e.id,
+                    e.ship.class,
+                    e.ship.team,
+                    e.transform.pos,
+                    e.transform.rot,
+                    self.registry.get(e.ship.class).radius,
+                    e.disabled,
+                    e.towed_by,
+                    e.towing,
+                )
+            })
+            .collect();
+
+        // 1) Grapple: for each idle salvager, lock the nearest disabled hostile
+        // in grapple range. Stable id order keeps the choice deterministic.
+        for s in &snap {
+            if s.1 != ShipClass::Salvager || s.8.is_some() {
+                continue;
+            }
+            let mut best_d2 = f32::INFINITY;
+            let mut best: Option<EntityId> = None;
+            for t in &snap {
+                if t.0 == s.0 || t.2 == s.2 || !t.6 || t.7.is_some() {
+                    continue;
+                }
+                let d2 = (t.3 - s.3).length_squared();
+                let r = s.5 + t.5 + TOW_GRAPPLE_PAD;
+                if d2 > r * r {
+                    continue;
+                }
+                if d2 < best_d2 {
+                    best_d2 = d2;
+                    best = Some(t.0);
+                }
+            }
+            if let Some(tid) = best {
+                if let Some(e) = self.entity_mut(s.0) {
+                    e.towing = Some(tid);
+                }
+                if let Some(e) = self.entity_mut(tid) {
+                    e.towed_by = Some(s.0);
+                }
+            }
+        }
+
+        // 2) Track: snap each towed hull behind its salvager so it visibly
+        // follows along. We re-read salvager pos/rot from `self.entities`
+        // (movement already ran this step).
+        let tow_pairs: Vec<(EntityId, EntityId)> = self
+            .entities
+            .iter()
+            .filter_map(|e| e.towing.map(|tid| (e.id, tid)))
+            .collect();
+        for (sid, tid) in tow_pairs {
+            let salvager = self.entities.iter().find(|e| e.id == sid);
+            let target = self.entities.iter().find(|e| e.id == tid);
+            let (Some(s), Some(t)) = (salvager, target) else {
+                continue;
+            };
+            let s_radius = self.registry.get(s.ship.class).radius;
+            let t_radius = self.registry.get(t.ship.class).radius;
+            let forward = (s.transform.rot * Vec3::Z).normalize_or(Vec3::Z);
+            let pos = s.transform.pos - forward * (s_radius + t_radius + TOW_GRAPPLE_PAD);
+            let rot = s.transform.rot;
+            if let Some(e) = self.entity_mut(tid) {
+                e.transform.pos = pos;
+                e.transform.rot = rot;
+                e.velocity.linear = Vec3::ZERO;
+            }
+        }
+
+        // 3) Arrive: any salvager mid-tow within the Ark's grapple-range
+        // delivers its hull. The captured ship despawns and joins the queue.
+        if let Some((_, ark_pos, ark_radius)) = depot {
+            let arrivals: Vec<(EntityId, EntityId)> = self
+                .entities
+                .iter()
+                .filter_map(|e| {
+                    if e.ship.class != ShipClass::Salvager {
+                        return None;
+                    }
+                    let tid = e.towing?;
+                    let s_radius = self.registry.get(e.ship.class).radius;
+                    let d = (e.transform.pos - ark_pos).length();
+                    if d <= ark_radius + s_radius + TOW_ARRIVAL_PAD {
+                        Some((e.id, tid))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for (sid, tid) in arrivals {
+                if let Some(t) = self.entities.iter().find(|e| e.id == tid) {
+                    self.pending_captures.push(CapturedHull {
+                        class: t.ship.class,
+                        from_team: t.ship.team,
+                        captured_tick: self.tick,
+                    });
+                }
+                self.entities.retain(|e| e.id != tid);
+                if let Some(e) = self.entity_mut(sid) {
+                    e.towing = None;
+                }
+            }
+        }
+
+        // 4) Cleanup: a tow peer (salvager or hull) may have despawned this
+        // step; clear the stale id on the survivor so nothing latches forever.
+        let live: std::collections::HashSet<EntityId> =
+            self.entities.iter().map(|e| e.id).collect();
+        for e in &mut self.entities {
+            if let Some(t) = e.towing {
+                if !live.contains(&t) {
+                    e.towing = None;
+                }
+            }
+            if let Some(t) = e.towed_by {
+                if !live.contains(&t) {
+                    e.towed_by = None;
+                }
+            }
+        }
+    }
+
     fn enemy_commander_step(&mut self) {
         let live_nodes: Vec<(NodeId, Vec3)> = self
             .resource_nodes
@@ -1312,7 +1512,16 @@ impl World {
             // This step's steering goal, and whether arriving clears a move order.
             let mut goal: Option<Vec3> = None;
             let mut clear_order = false;
-            if let Some(g) = e.gather {
+            let mut speed_factor = 1.0_f32;
+            // A salvager mid-tow heads straight for the Ark at half speed,
+            // overriding any other goal. The tow step below resolves the
+            // capture on arrival.
+            if e.towing.is_some() {
+                if let Some((dp, _)) = depot {
+                    goal = Some(dp);
+                    speed_factor = TOW_SPEED_FACTOR;
+                }
+            } else if let Some(g) = e.gather {
                 let target = if g.returning {
                     // Return to the harvester's own team mothership.
                     match e.ship.team {
@@ -1352,12 +1561,15 @@ impl World {
                         e.order = None;
                     }
                 } else {
-                    // Arrive: ease down inside the stopping distance.
-                    let slowing = (bp.max_speed * bp.max_speed) / (2.0 * bp.accel.max(0.01));
+                    // Arrive: ease down inside the stopping distance. Apply the
+                    // tow's speed factor here so a towing salvager really moves
+                    // at half its book speed.
+                    let max_speed = bp.max_speed * speed_factor;
+                    let slowing = (max_speed * max_speed) / (2.0 * bp.accel.max(0.01));
                     let speed = if dist < slowing {
-                        bp.max_speed * (dist / slowing)
+                        max_speed * (dist / slowing)
                     } else {
-                        bp.max_speed
+                        max_speed
                     };
                     desired = to / dist * speed;
 
@@ -1379,8 +1591,9 @@ impl World {
                 }
             }
 
-            if desired.length() > bp.max_speed {
-                desired = desired.normalize() * bp.max_speed;
+            let speed_cap = bp.max_speed * speed_factor;
+            if desired.length() > speed_cap {
+                desired = desired.normalize() * speed_cap;
             }
             let dv = (desired - e.velocity.linear).clamp_length_max(bp.accel * dt);
             e.velocity.linear += dv;
@@ -1433,6 +1646,13 @@ impl World {
             // Disabled ships sit dead in the water: no firing and no targeting,
             // until a friendly salvager tows them home.
             if e.disabled {
+                e.target = None;
+                e.attack_target = None;
+                continue;
+            }
+            // A salvager mid-tow doesn't fire its disabler: it's busy hauling
+            // a hull home and shouldn't tag new prey it can't process.
+            if e.towing.is_some() {
                 e.target = None;
                 e.attack_target = None;
                 continue;
@@ -1713,6 +1933,10 @@ impl World {
         self.projectiles.append(&mut new_projectiles);
         self.combat_events.append(&mut events);
 
+        // 4.1) Tow loop: grapple newly-disabled hulls, track towed positions,
+        // and resolve arrivals into the pending-captures queue.
+        self.step_tow_loop();
+
         // Shield recharge: after the post-hit delay elapses, shields regenerate
         // toward `max_shield`. Stable order; runs for every shielded survivor.
         for e in &mut self.entities {
@@ -1858,6 +2082,8 @@ impl World {
             h = fnv1a(h, e.shield.to_bits());
             h = fnv1a(h, e.stance as u32);
             h = fnv1a(h, e.disabled as u32);
+            h = fnv1a(h, e.towing.map(|i| i.0).unwrap_or(u32::MAX));
+            h = fnv1a(h, e.towed_by.map(|i| i.0).unwrap_or(u32::MAX));
             let (ax, ay, az, ap) = match e.anchor {
                 Some(a) => (a.x, a.y, a.z, 1u32),
                 None => (0.0, 0.0, 0.0, 0u32),
@@ -1889,6 +2115,11 @@ impl World {
         for b in &self.enemy_build_queue {
             h = fnv1a(h, b.class as u32);
             h = fnv1a(h, b.progress.to_bits());
+        }
+        for c in &self.pending_captures {
+            h = fnv1a(h, c.class as u32);
+            h = fnv1a(h, c.from_team as u32);
+            h = fnv1a(h, c.captured_tick as u32);
         }
         for p in &self.projectiles {
             h = fnv1a(h, p.id.0);
@@ -2452,6 +2683,73 @@ mod tests {
                 "salvager must hold fire on a full-hull target",
             );
         }
+    }
+
+    #[test]
+    fn salvager_grapples_adjacent_disabled_enemy() {
+        let mut w = World::new(101);
+        // Carrier far away so the arrival check doesn't fire on the same step.
+        w.spawn_class(ShipClass::Carrier, Team::Player, Vec3::new(0.0, 0.0, 200.0));
+        let s = w.spawn_class(ShipClass::Salvager, Team::Player, Vec3::ZERO);
+        let f = w.spawn_class(ShipClass::Fighter, Team::Enemy, Vec3::new(4.0, 0.0, 0.0));
+        // Pre-disable the fighter so the tow loop will pick it up.
+        w.entities.iter_mut().find(|e| e.id == f).unwrap().disabled = true;
+        w.step(TICK_DT);
+        assert_eq!(
+            w.entity(s).unwrap().towing,
+            Some(f),
+            "salvager should grapple the disabled fighter"
+        );
+        assert_eq!(
+            w.entity(f).unwrap().towed_by,
+            Some(s),
+            "fighter should know it's being towed"
+        );
+    }
+
+    #[test]
+    fn towed_hull_tracks_behind_salvager() {
+        let mut w = World::new(103);
+        w.spawn_class(ShipClass::Carrier, Team::Player, Vec3::new(0.0, 0.0, 200.0));
+        let s = w.spawn_class(ShipClass::Salvager, Team::Player, Vec3::ZERO);
+        let f = w.spawn_class(ShipClass::Fighter, Team::Enemy, Vec3::new(4.0, 0.0, 0.0));
+        w.entities.iter_mut().find(|e| e.id == f).unwrap().disabled = true;
+        // First step grapples; second step's track snaps the fighter behind.
+        w.step(TICK_DT);
+        w.step(TICK_DT);
+        let s_pos = w.entity(s).unwrap().transform.pos;
+        let f_pos = w.entity(f).unwrap().transform.pos;
+        let d = (s_pos - f_pos).length();
+        assert!(
+            d > 0.0 && d < 12.0,
+            "towed fighter should be parked near the salvager: {} apart",
+            d,
+        );
+    }
+
+    #[test]
+    fn tow_completes_at_mothership_and_queues_capture() {
+        let mut w = World::new(105);
+        w.spawn_class(ShipClass::Carrier, Team::Player, Vec3::ZERO);
+        let s = w.spawn_class(ShipClass::Salvager, Team::Player, Vec3::new(10.0, 0.0, 0.0));
+        let f = w.spawn_class(ShipClass::Fighter, Team::Enemy, Vec3::new(13.0, 0.0, 0.0));
+        w.entities.iter_mut().find(|e| e.id == f).unwrap().disabled = true;
+        // Single step: grapple + arrival both fire (salvager already inside the
+        // carrier's arrival radius), so the capture should resolve immediately.
+        w.step(TICK_DT);
+        assert!(
+            w.entity(f).is_none(),
+            "fighter should despawn into the queue"
+        );
+        assert_eq!(w.pending_captures.len(), 1, "one capture should be queued");
+        let cap = w.pending_captures[0];
+        assert_eq!(cap.class, ShipClass::Fighter);
+        assert_eq!(cap.from_team, Team::Enemy);
+        assert_eq!(
+            w.entity(s).unwrap().towing,
+            None,
+            "salvager should drop the tow"
+        );
     }
 
     #[test]

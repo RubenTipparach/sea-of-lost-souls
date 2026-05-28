@@ -1028,6 +1028,7 @@ impl App {
         #[cfg(target_arch = "wasm32")]
         {
             set_resources(self.world.matter, carrying_total);
+            set_pending_captures(self.world.pending_captures.len());
             set_crew(&self.world);
             let status = match self.world.build_queue.first() {
                 Some(b) => {
@@ -2971,6 +2972,25 @@ fn set_resources(matter: f32, in_transit: f32) {
             el.set_text_content(Some(&text));
         }
     }
+}
+
+/// Pending-captures badge: shown only when at least one towed hull is waiting
+/// for a Keep / Liquidate decision at the Ark.
+#[cfg(target_arch = "wasm32")]
+fn set_pending_captures(count: usize) {
+    let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+        return;
+    };
+    let Some(el) = doc.get_element_by_id("sol-pending") else {
+        return;
+    };
+    if count == 0 {
+        let _ = el.set_attribute("hidden", "");
+        return;
+    }
+    let _ = el.remove_attribute("hidden");
+    let label = if count == 1 { "hull" } else { "hulls" };
+    el.set_text_content(Some(&format!("{count} {label} awaiting decision")));
 }
 
 /// Update the formation HUD button label to the active formation.
