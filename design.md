@@ -791,8 +791,19 @@ the attacker as their target, and **returns to its anchor** (the last move-order
 point, or the spot where stance was set) when the fight ends; **Aggressive**
 auto-acquires out to sensor range and chases targets down. Mother ships and
 harvesters spawn **Passive** by default so they never wander off to fight; the
-rest spawn Defensive. (A higher-level "commander AI" that runs the enemy
-economy and plans raids is the next layer; ship-level stance behavior is in.) (Hull sections and subsystem disable
+rest spawn Defensive. When a non-combat ship is hit it **flees toward the
+nearest armed ally**; when an armed Defensive/Aggressive ship is hit without a
+commanded target, it **retaliates against the attacker** (so an enemy combat
+ship pulled off a non-combat target the moment a real threat opens fire on it).
+
+**Enemy commander AI (current build).** The sim now runs a two-level AI: the
+per-ship stance behavior above, plus a strategic **commander** that owns the
+enemy team's economy. The enemy team has its own `enemy_salvage` pool and
+`enemy_build_queue`; each step the commander dispatches idle enemy harvesters
+to the nearest live resource node and, when the line is idle and salvage
+allows, queues a new combat ship (rotating Fighter / Corvette / Bomber) at the
+enemy mothership. Enemy combat-ship movement is still driven by the per-ship
+enemy AI block (advance on the player mothership / standoff in sensor range). (Hull sections and subsystem disable
 from [§6.3](#63-structure-hitboxes--positional-damage) are still deferred; facing
 is the first positional step.) Combat VFX read from a deterministic event
 stream the sim emits each step (`World::drain_combat_events`): the renderer

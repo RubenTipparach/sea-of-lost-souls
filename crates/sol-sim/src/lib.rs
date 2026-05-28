@@ -613,6 +613,8 @@ pub struct World {
     pub build_queue: Vec<BuildItem>,
     /// Enemy mothership's build queue, populated by the commander AI.
     pub enemy_build_queue: Vec<BuildItem>,
+    /// Counter the commander rotates through combat classes with on each queue.
+    pub enemy_build_index: u32,
     pub registry: ShipRegistry,
     pub rng: Rng,
     /// Number of fixed steps taken; part of the determinism checksum.
@@ -636,6 +638,7 @@ impl World {
             enemy_salvage: 0.0,
             build_queue: Vec::new(),
             enemy_build_queue: Vec::new(),
+            enemy_build_index: 0,
             registry: ShipRegistry::with_defaults(),
             rng: Rng::new(seed),
             tick: 0,
@@ -785,6 +788,65 @@ impl World {
     /// buffer. The renderer calls this after each step to spawn VFX.
     pub fn drain_combat_events(&mut self) -> Vec<CombatEvent> {
         std::mem::take(&mut self.combat_events)
+    }
+
+    /// Enemy commander AI: a per-team strategic layer that runs the enemy
+    /// economy. Stateless across steps (decisions derive from current world
+    /// state); deterministic and side-effect free outside the sim.
+    ///   - Dispatches idle enemy harvesters to the nearest live resource node.
+    ///   - When the enemy build queue is empty and enough salvage has accrued,
+    ///     queues a new combat ship, rotating between Fighter/Corvette/Bomber.
+    ///
+    /// Combat-ship movement is still driven by the per-ship enemy AI block
+    /// (advance on the player mothership / standoff in sensor range).
+    fn enemy_commander_step(&mut self) {
+        let live_nodes: Vec<(NodeId, Vec3)> = self
+            .resource_nodes
+            .iter()
+            .filter(|n| n.amount > 0.0)
+            .map(|n| (n.id, n.pos))
+            .collect();
+        for e in &mut self.entities {
+            if e.ship.team != Team::Enemy || e.ship.class != ShipClass::Resourcer {
+                continue;
+            }
+            if e.gather.is_some() {
+                continue;
+            }
+            let my_pos = e.transform.pos;
+            let mut best_d2 = f32::INFINITY;
+            let mut best: Option<NodeId> = None;
+            for &(nid, npos) in &live_nodes {
+                let d2 = (npos - my_pos).length_squared();
+                if d2 < best_d2 {
+                    best_d2 = d2;
+                    best = Some(nid);
+                }
+            }
+            if let Some(node) = best {
+                e.gather = Some(Gather {
+                    node,
+                    carrying: 0.0,
+                    returning: false,
+                });
+            }
+        }
+        // Build funding: rotate Fighter -> Corvette -> Bomber, queue the next
+        // affordable class when the line is idle.
+        if self.enemy_build_queue.is_empty() {
+            const CLASSES: [ShipClass; 3] =
+                [ShipClass::Fighter, ShipClass::Corvette, ShipClass::Bomber];
+            let class = CLASSES[(self.enemy_build_index as usize) % CLASSES.len()];
+            let cost = self.registry.get(class).cost;
+            if self.enemy_salvage >= cost {
+                self.enemy_salvage -= cost;
+                self.enemy_build_queue.push(BuildItem {
+                    class,
+                    progress: 0.0,
+                });
+                self.enemy_build_index = self.enemy_build_index.wrapping_add(1);
+            }
+        }
     }
 
     /// Look up an entity by id (linear scan; entity counts are small in
@@ -965,6 +1027,9 @@ impl World {
                 e.order = goal.or(rally);
             }
         }
+
+        // 2b.1) Enemy commander AI: schedule harvesters and fund builds.
+        self.enemy_commander_step();
 
         // 2c) Stance behavior (player team):
         //   - SOS: an attack on a friendly broadcasts; nearby non-passive armed
@@ -2072,6 +2137,42 @@ mod tests {
         assert!(
             moved > 2.0 || killed,
             "aggressive should close on (or destroy) an out-of-range hostile: moved {moved}, killed {killed}",
+        );
+    }
+
+    #[test]
+    fn enemy_commander_dispatches_idle_harvesters() {
+        let mut w = World::new(61);
+        w.spawn_class(ShipClass::Carrier, Team::Enemy, Vec3::new(100.0, 0.0, 0.0));
+        let h = w.spawn_class(
+            ShipClass::Resourcer,
+            Team::Enemy,
+            Vec3::new(102.0, 0.0, 0.0),
+        );
+        let node = w.spawn_resource_node(Vec3::new(110.0, 0.0, 0.0), 500.0, 4.0);
+        // No Gather command: the commander should assign one on the first step.
+        w.step(TICK_DT);
+        let g = w
+            .entity(h)
+            .and_then(|e| e.gather)
+            .expect("commander should assign a gather task");
+        assert_eq!(g.node, node);
+    }
+
+    #[test]
+    fn enemy_commander_funds_a_build_when_affordable() {
+        let mut w = World::new(63);
+        w.spawn_class(ShipClass::Carrier, Team::Enemy, Vec3::ZERO);
+        // Cheapest fighter (30 salvage); seed enough to fund one.
+        w.enemy_salvage = 100.0;
+        w.step(TICK_DT);
+        assert!(
+            !w.enemy_build_queue.is_empty(),
+            "commander should queue an affordable build"
+        );
+        assert!(
+            w.enemy_salvage < 100.0,
+            "queueing should debit the enemy salvage pool"
         );
     }
 
