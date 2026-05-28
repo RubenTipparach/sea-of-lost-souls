@@ -16,6 +16,22 @@ before making non-trivial changes.
 
 ---
 
+## ⚠️ Hard rule: fix-it.md must be empty before new features
+
+While [`fix-it.md`](./fix-it.md) has any items in **Pending** or **Awaiting
+validation**, no new features land. The only allowed work is:
+
+- Implementing the remaining items on the list.
+- Fixing regressions in items already on the list.
+- Refactors that are needed to land items on the list.
+
+After every push that lands fixes, **remind the user** which items moved
+to "Awaiting validation" and ask them to test in the live build. Validated
+items are **deleted** from `fix-it.md` (they don't accumulate as a history).
+When the file is empty, normal feature work resumes.
+
+---
+
 ## ⚠️ Hard rule: asset generation (static vs. procedural)
 
 > **All game models and their textures MUST be statically generated** -
