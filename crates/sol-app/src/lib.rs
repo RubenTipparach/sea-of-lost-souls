@@ -647,7 +647,20 @@ impl App {
                 let ground = Vec3::new(pos.x, 0.0, pos.z);
                 push_circle(&mut gizmo_lines, ground, r * 1.4 + 0.6, [0.3, 1.0, 0.6], 28);
                 push_line(&mut gizmo_lines, ground, pos, [0.2, 0.6, 0.4]);
-                if let Some(target) = e.order {
+                // Red lead line + reticle to a commanded attack target; otherwise
+                // the gold move line to the order point.
+                if let Some(te) = e.attack_target.and_then(|tid| self.world.entity(tid)) {
+                    let tpos = te.prev_transform.pos.lerp(te.transform.pos, alpha);
+                    let tr = self.world.registry.get(te.ship.class).radius;
+                    push_dashes(&mut gizmo_lines, pos, tpos, [1.0, 0.32, 0.27], 1.4, 0.8);
+                    push_circle(
+                        &mut gizmo_lines,
+                        tpos,
+                        tr * 1.5 + 0.8,
+                        [1.0, 0.32, 0.27],
+                        22,
+                    );
+                } else if let Some(target) = e.order {
                     push_dashes(&mut gizmo_lines, pos, target, [1.0, 0.75, 0.25], 1.2, 0.9);
                     push_circle(&mut gizmo_lines, target, 0.8, [1.0, 0.75, 0.25], 16);
                 }
@@ -1383,12 +1396,24 @@ impl App {
         }
     }
 
-    /// Right click / mobile move: order the selection here. Clicking a resource
-    /// node with any resourcer selected sends those resourcers to harvest it;
-    /// otherwise it is a formation move to the clicked point.
+    /// Right click / mobile move: order the selection here. Clicking a hostile
+    /// ship orders the (armed) selection to attack it; clicking a resource node
+    /// with any resourcer selected sends those resourcers to harvest it; otherwise
+    /// it is a formation move to the clicked point.
     fn on_move_click(&mut self, sx: f64, sy: f64) {
         if self.selected.is_empty() {
             return;
+        }
+        // Attack a clicked hostile (takes priority over a move to that spot).
+        if let Some(id) = self.pick(sx, sy) {
+            if self
+                .world
+                .entity(id)
+                .is_some_and(|e| e.ship.team == Team::Enemy)
+            {
+                self.issue_attack(id);
+                return;
+            }
         }
         if let Some(node) = self.pick_node(sx, sy) {
             let resourcers: Vec<EntityId> = self
@@ -1414,12 +1439,29 @@ impl App {
         }
     }
 
-    /// Mobile tap: select a tapped ship, else move the current selection here.
+    /// Mobile tap: tapping a hostile with ships selected attacks it; tapping any
+    /// other ship selects it; tapping empty space moves the current selection.
     fn on_tap(&mut self, sx: f64, sy: f64) {
         if let Some(id) = self.pick(sx, sy) {
-            self.selected = vec![id];
+            let hostile = self
+                .world
+                .entity(id)
+                .is_some_and(|e| e.ship.team == Team::Enemy);
+            if hostile && !self.selected.is_empty() {
+                self.issue_attack(id);
+            } else {
+                self.selected = vec![id];
+            }
         } else if !self.selected.is_empty() {
             self.on_move_click(sx, sy);
+        }
+    }
+
+    /// Order every selected ship to attack `target` (the sim ignores it for
+    /// unarmed classes).
+    fn issue_attack(&mut self, target: EntityId) {
+        for id in self.selected.clone() {
+            self.world.enqueue(Command::Attack { entity: id, target });
         }
     }
 

@@ -441,6 +441,9 @@ pub struct Entity {
     pub gather: Option<Gather>,
     /// Current combat target (auto-acquired nearest hostile in weapon range).
     pub target: Option<EntityId>,
+    /// Player/AI commanded attack target: pursue to weapon range and focus fire.
+    /// Overrides auto-acquisition; cleared by a move/stop order or target death.
+    pub attack_target: Option<EntityId>,
     /// Seconds until this ship's weapon can fire again.
     pub weapon_cooldown: f32,
 }
@@ -484,6 +487,9 @@ pub enum Command {
     SetVelocity { entity: EntityId, linear: Vec3 },
     /// Halt an entity and clear any move/gather order.
     Stop { entity: EntityId },
+    /// Order a ship to engage a specific target: pursue it to weapon range and
+    /// focus fire. Ignored for unarmed classes. Overrides auto-acquisition.
+    Attack { entity: EntityId, target: EntityId },
     /// Send a resourcer to harvest a node (ignored for ships with no cargo).
     Gather { entity: EntityId, node: NodeId },
     /// Queue a ship of `class` for construction at the mothership; salvage is
@@ -626,6 +632,7 @@ impl World {
             patrol: None,
             gather: None,
             target: None,
+            attack_target: None,
             weapon_cooldown: 0.0,
         });
         id
@@ -684,6 +691,7 @@ impl World {
                         e.order = Some(target);
                         e.patrol = None; // a direct order overrides a patrol
                         e.gather = None; // and cancels any gather task
+                        e.attack_target = None; // and breaks off an attack
                     }
                 }
                 Command::SetVelocity { entity, linear } => {
@@ -695,7 +703,23 @@ impl World {
                     if let Some(e) = self.entity_mut(entity) {
                         e.order = None;
                         e.gather = None;
+                        e.attack_target = None;
                         e.velocity.linear = Vec3::ZERO;
+                    }
+                }
+                Command::Attack { entity, target } => {
+                    // Only armed ships can be ordered to attack, and never to
+                    // attack themselves.
+                    let armed = entity != target
+                        && self
+                            .entity(entity)
+                            .is_some_and(|e| self.registry.get(e.ship.class).weapon.is_some());
+                    if armed {
+                        if let Some(e) = self.entity_mut(entity) {
+                            e.attack_target = Some(target);
+                            e.gather = None;
+                            e.patrol = None;
+                        }
                     }
                 }
                 Command::Gather { entity, node } => {
@@ -802,6 +826,40 @@ impl World {
                     None => p,
                 });
                 e.order = goal.or(rally);
+            }
+        }
+
+        // 2c) Attack pursuit: a ship with a commanded `attack_target` steers to a
+        // weapon-range standoff of that target each step (focus fire happens in
+        // the combat pass). Reads pre-move positions; a dead target ends the order.
+        let attack_positions: Vec<(EntityId, Vec3)> = self
+            .entities
+            .iter()
+            .map(|e| (e.id, e.transform.pos))
+            .collect();
+        for e in &mut self.entities {
+            let Some(aid) = e.attack_target else {
+                continue;
+            };
+            let Some(weapon) = self.registry.get(e.ship.class).weapon else {
+                e.attack_target = None;
+                continue;
+            };
+            match attack_positions.iter().find(|p| p.0 == aid) {
+                Some(&(_, tpos)) => {
+                    let to = e.transform.pos - tpos;
+                    let d = to.length();
+                    e.order = Some(if d > 1e-3 {
+                        tpos + to / d * (weapon.range * 0.7)
+                    } else {
+                        tpos
+                    });
+                }
+                None => {
+                    // Target destroyed or gone: break off and hold.
+                    e.attack_target = None;
+                    e.order = None;
+                }
             }
         }
 
@@ -939,14 +997,27 @@ impl World {
             let my_id = e.id;
             let my_pos = e.transform.pos;
             let max_d2 = weapon.range * weapon.range;
-            // Keep the current target if it is still hostile, alive, and in range;
-            // otherwise acquire the nearest hostile (stable id order breaks ties).
-            let mut target: Option<(EntityId, Vec3, Vec3)> = e.target.and_then(|id| {
-                combatants
-                    .iter()
-                    .find(|c| c.0 == id && c.1 != team && (c.2 - my_pos).length_squared() <= max_d2)
-                    .map(|c| (c.0, c.2, c.3))
-            });
+            // Target priority: a commanded attack target (at any range, so the
+            // ship can pursue and lock) wins; else keep the current auto-target if
+            // still in range; else acquire the nearest hostile (stable id order
+            // breaks ties). A vanished commanded target clears the attack order.
+            let mut target: Option<(EntityId, Vec3, Vec3)> = None;
+            if let Some(aid) = e.attack_target {
+                match combatants.iter().find(|c| c.0 == aid && c.1 != team) {
+                    Some(c) => target = Some((c.0, c.2, c.3)),
+                    None => e.attack_target = None,
+                }
+            }
+            if target.is_none() {
+                target = e.target.and_then(|id| {
+                    combatants
+                        .iter()
+                        .find(|c| {
+                            c.0 == id && c.1 != team && (c.2 - my_pos).length_squared() <= max_d2
+                        })
+                        .map(|c| (c.0, c.2, c.3))
+                });
+            }
             if target.is_none() {
                 let mut best_d2 = f32::INFINITY;
                 for &(id, t, pos, vel, _r) in &combatants {
@@ -961,7 +1032,13 @@ impl World {
                 }
             }
             e.target = target.map(|(id, _, _)| id);
-            if let (true, Some((tid, tpos, tvel))) = (e.weapon_cooldown <= 0.0, target) {
+            // Fire only when the target is within weapon range (a commanded target
+            // may still be out of range while the ship closes).
+            let in_range =
+                target.is_some_and(|(_, tpos, _)| (tpos - my_pos).length_squared() <= max_d2);
+            if let (true, true, Some((tid, tpos, tvel))) =
+                (e.weapon_cooldown <= 0.0, in_range, target)
+            {
                 let dir = if weapon.kind == WeaponKind::Missile {
                     (tpos - my_pos).normalize_or_zero()
                 } else {
@@ -1536,6 +1613,50 @@ mod tests {
             w.checksum()
         };
         assert_eq!(run(), run(), "combat must be bit-identical across runs");
+    }
+
+    #[test]
+    fn attack_order_focuses_commanded_target() {
+        let mut w = World::new(17);
+        let a = w.spawn_class(ShipClass::Corvette, Team::Player, Vec3::ZERO);
+        // A nearer enemy the corvette would auto-pick, and the commanded one.
+        w.spawn_class(ShipClass::Fighter, Team::Enemy, Vec3::new(15.0, 0.0, 0.0));
+        let far = w.spawn_class(ShipClass::Fighter, Team::Enemy, Vec3::new(40.0, 0.0, 5.0));
+        w.enqueue(Command::Attack {
+            entity: a,
+            target: far,
+        });
+        w.step(TICK_DT);
+        assert_eq!(
+            w.entity(a).unwrap().target,
+            Some(far),
+            "commanded target should win over the nearer auto-pick"
+        );
+    }
+
+    #[test]
+    fn attack_order_pursues_and_destroys_target() {
+        let mut w = World::new(17);
+        let a = w.spawn_class(ShipClass::Corvette, Team::Player, Vec3::ZERO);
+        // Target sits beyond the corvette's 26 range, so it must close to engage.
+        let far = w.spawn_class(ShipClass::Fighter, Team::Enemy, Vec3::new(40.0, 0.0, 0.0));
+        w.enqueue(Command::Attack {
+            entity: a,
+            target: far,
+        });
+        let mut steps = 0;
+        while w.entity(far).is_some() && steps < TICK_HZ * 40 {
+            w.step(TICK_DT);
+            steps += 1;
+        }
+        assert!(
+            w.entity(far).is_none(),
+            "attacker should pursue and destroy its commanded target"
+        );
+        assert!(
+            w.entity(a).is_some(),
+            "the corvette should survive the fighter"
+        );
     }
 
     #[test]

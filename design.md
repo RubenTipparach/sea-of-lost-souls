@@ -709,7 +709,8 @@ the target as the order set lands:
 | Elevation (focus Y) | **`Q`** down / **`E`** up; mobile **elevation slider** |
 | Orbit / zoom | RMB drag / wheel (desktop); one-finger drag / pinch (touch) |
 | Select / band-box | LMB click / LMB-drag; mobile tap / hold **Box Select** + drag |
-| Move (context order) | RMB; mobile tap on empty space |
+| Move (context order) | RMB on empty space; mobile tap on empty space |
+| Attack a target | RMB a hostile ship; mobile tap a hostile (with ships selected) |
 | Cycle formation | **`C`** or the **Form:** HUD button |
 | Select all (player) | **`Shift+A`** or the **Select All** button |
 | Stop | **`Shift+S`** or the **Stop** button |
@@ -774,7 +775,10 @@ fixed step: unguided shots fly on a deterministic **lead/intercept** solution,
 missiles steer toward their target, and hits use a **swept segment-vs-sphere**
 test (CCD, no tunneling). Every ship **auto-engages** the nearest hostile in
 weapon range and fires on cooldown; the enemy AI now closes to a weapon-range
-standoff instead of ramming. Impacts subtract flat **hull** damage and a ship at
+standoff instead of ramming. Players can also issue a manual **attack order**
+(RMB or tap a hostile): the selected ships pursue that target to weapon range and
+focus fire (`Command::Attack`), shown by a red lead line and reticle. Impacts
+subtract flat **hull** damage and a ship at
 zero hull despawns. (Shields, hull sections, and positional/subsystem damage from
 [§6.3](#63-structure-hitboxes--positional-damage)/[§6.8](#68-ballistics--projectiles)
 are still deferred.) The renderer draws projectile tracers + glints and an
