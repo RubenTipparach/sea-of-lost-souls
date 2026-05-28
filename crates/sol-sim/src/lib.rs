@@ -606,8 +606,13 @@ pub struct World {
     pub resource_nodes: Vec<ResourceNode>,
     /// Salvage banked at the mothership (the player's resource pool).
     pub salvage: f32,
+    /// Enemy team's salvage pool, fed by enemy harvesters depositing at the
+    /// enemy mothership. Spent by the commander AI to queue new enemy builds.
+    pub enemy_salvage: f32,
     /// Ships under construction at the mothership (front item builds first).
     pub build_queue: Vec<BuildItem>,
+    /// Enemy mothership's build queue, populated by the commander AI.
+    pub enemy_build_queue: Vec<BuildItem>,
     pub registry: ShipRegistry,
     pub rng: Rng,
     /// Number of fixed steps taken; part of the determinism checksum.
@@ -628,7 +633,9 @@ impl World {
             combat_events: Vec::new(),
             resource_nodes: Vec::new(),
             salvage: 0.0,
+            enemy_salvage: 0.0,
             build_queue: Vec::new(),
+            enemy_build_queue: Vec::new(),
             registry: ShipRegistry::with_defaults(),
             rng: Rng::new(seed),
             tick: 0,
@@ -899,11 +906,17 @@ impl World {
             })
             .collect();
 
-        // Deposit point: the player's mothership (first carrier in spawn order).
+        // Deposit point for each team: the first carrier in spawn order on that
+        // team, used as both the harvester drop-off and the enemy AI rally point.
         let depot: Option<(Vec3, f32)> = self
             .entities
             .iter()
             .find(|e| e.ship.class == ShipClass::Carrier && e.ship.team == Team::Player)
+            .map(|e| (e.transform.pos, self.registry.get(e.ship.class).radius));
+        let enemy_depot: Option<(Vec3, f32)> = self
+            .entities
+            .iter()
+            .find(|e| e.ship.class == ShipClass::Carrier && e.ship.team == Team::Enemy)
             .map(|e| (e.transform.pos, self.registry.get(e.ship.class).radius));
 
         // 2b) Enemy AI (movement only): each enemy steers toward the nearest
@@ -1064,7 +1077,11 @@ impl World {
             let mut clear_order = false;
             if let Some(g) = e.gather {
                 let target = if g.returning {
-                    depot
+                    // Return to the harvester's own team mothership.
+                    match e.ship.team {
+                        Team::Enemy => enemy_depot,
+                        _ => depot,
+                    }
                 } else {
                     self.resource_nodes
                         .iter()
@@ -1396,14 +1413,23 @@ impl World {
                 continue;
             };
             let pos = self.entities[i].transform.pos;
+            let team = self.entities[i].ship.team;
             let bp = self.registry.get(self.entities[i].ship.class);
             let (ship_r, cargo) = (bp.radius, bp.cargo);
+            // Each harvester deposits at its own team's mothership.
+            let team_depot = match team {
+                Team::Enemy => enemy_depot,
+                _ => depot,
+            };
 
             if g.returning {
                 // Deposit at the mothership, then head back out (or finish).
-                if let Some((dpos, dr)) = depot {
+                if let Some((dpos, dr)) = team_depot {
                     if (pos - dpos).length() <= dr + ship_r + 2.5 {
-                        self.salvage += g.carrying;
+                        match team {
+                            Team::Enemy => self.enemy_salvage += g.carrying,
+                            _ => self.salvage += g.carrying,
+                        }
                         let empty = self
                             .resource_nodes
                             .iter()
@@ -1447,20 +1473,37 @@ impl World {
             }
         }
 
-        // 5) Production: advance the front build at the mothership; when it
-        // finishes, spawn the ship near the carrier at a spread angle.
+        // 5) Production: advance each team's front build at its mothership; when
+        // it finishes, spawn the ship near the carrier at a spread angle.
         if let Some(front) = self.build_queue.first_mut() {
             front.progress += dt;
         }
-        if let Some(front) = self.build_queue.first().copied() {
-            if front.progress >= self.registry.get(front.class).build_time {
-                self.build_queue.remove(0);
-                let (center, cr) = depot.unwrap_or((Vec3::ZERO, 8.0));
-                // Golden-angle spread so successive builds don't stack.
-                let angle = self.next_id as f32 * 2.399_963;
-                let off = Vec3::new(angle.cos(), 0.0, angle.sin()) * (cr + 5.0);
-                self.spawn_class(front.class, Team::Player, center + off);
-            }
+        let player_done = self
+            .build_queue
+            .first()
+            .copied()
+            .filter(|f| f.progress >= self.registry.get(f.class).build_time);
+        if let Some(front) = player_done {
+            self.build_queue.remove(0);
+            let (center, cr) = depot.unwrap_or((Vec3::ZERO, 8.0));
+            let angle = self.next_id as f32 * 2.399_963;
+            let off = Vec3::new(angle.cos(), 0.0, angle.sin()) * (cr + 5.0);
+            self.spawn_class(front.class, Team::Player, center + off);
+        }
+        if let Some(front) = self.enemy_build_queue.first_mut() {
+            front.progress += dt;
+        }
+        let enemy_done = self
+            .enemy_build_queue
+            .first()
+            .copied()
+            .filter(|f| f.progress >= self.registry.get(f.class).build_time);
+        if let Some(front) = enemy_done {
+            self.enemy_build_queue.remove(0);
+            let (center, cr) = enemy_depot.unwrap_or((Vec3::ZERO, 8.0));
+            let angle = self.next_id as f32 * 2.399_963;
+            let off = Vec3::new(angle.cos(), 0.0, angle.sin()) * (cr + 5.0);
+            self.spawn_class(front.class, Team::Enemy, center + off);
         }
 
         self.tick += 1;
@@ -1503,11 +1546,16 @@ impl World {
             h = fnv1a(h, e.gather.map(|g| g.carrying).unwrap_or(0.0).to_bits());
         }
         h = fnv1a(h, self.salvage.to_bits());
+        h = fnv1a(h, self.enemy_salvage.to_bits());
         for n in &self.resource_nodes {
             h = fnv1a(h, n.id.0);
             h = fnv1a(h, n.amount.to_bits());
         }
         for b in &self.build_queue {
+            h = fnv1a(h, b.class as u32);
+            h = fnv1a(h, b.progress.to_bits());
+        }
+        for b in &self.enemy_build_queue {
             h = fnv1a(h, b.class as u32);
             h = fnv1a(h, b.progress.to_bits());
         }
@@ -2025,6 +2073,25 @@ mod tests {
             moved > 2.0 || killed,
             "aggressive should close on (or destroy) an out-of-range hostile: moved {moved}, killed {killed}",
         );
+    }
+
+    #[test]
+    fn enemy_harvester_deposits_to_enemy_salvage() {
+        let mut w = World::new(51);
+        w.spawn_class(ShipClass::Carrier, Team::Enemy, Vec3::new(100.0, 0.0, 0.0));
+        let h = w.spawn_class(ShipClass::Resourcer, Team::Enemy, Vec3::new(95.0, 0.0, 8.0));
+        let node = w.spawn_resource_node(Vec3::new(105.0, 0.0, 8.0), 500.0, 4.0);
+        w.enqueue(Command::Gather { entity: h, node });
+        // Multiple harvest+deposit cycles within 25s.
+        for _ in 0..(TICK_HZ * 25) {
+            w.step(TICK_DT);
+        }
+        assert!(
+            w.enemy_salvage > 0.0,
+            "enemy harvester should deposit to enemy salvage: {}",
+            w.enemy_salvage,
+        );
+        assert_eq!(w.salvage, 0.0, "player salvage should not change");
     }
 
     #[test]

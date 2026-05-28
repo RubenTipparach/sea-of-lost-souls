@@ -2208,9 +2208,28 @@ fn spawn_demo_fleet(world: &mut World) {
         );
     }
 
+    // Enemy mothership across the map with two harvesters nearby; the commander
+    // AI will dispatch them to gather salvage and fund new builds.
+    world.spawn_class(
+        ShipClass::Carrier,
+        Team::Enemy,
+        Vec3::new(220.0, 0.0, -180.0),
+    );
+    for (i, off) in [Vec3::new(-12.0, 0.0, 0.0), Vec3::new(12.0, 0.0, 4.0)]
+        .into_iter()
+        .enumerate()
+    {
+        let _ = i;
+        world.spawn_class(
+            ShipClass::Resourcer,
+            Team::Enemy,
+            Vec3::new(220.0, 0.0, -180.0) + off,
+        );
+    }
+
     // An enemy strike group inbound from one flank. It starts beyond the fleet's
     // sensors (hidden by fog of war) and advances on the mothership, popping into
-    // view as it crosses a player sensor sphere. The AI is movement-only for now.
+    // view as it crosses a player sensor sphere.
     let enemy = [
         (ShipClass::Corvette, Vec3::new(120.0, 0.0, -90.0)),
         (ShipClass::Fighter, Vec3::new(128.0, 4.0, -84.0)),
