@@ -58,7 +58,7 @@ technologies you pry from the dead.
 | **Space is a 3D place, not a plane** | Full volumetric movement, the famous Homeworld move-disk, attacks from above/below. | 2D-on-a-plane RTS with a fixed top-down camera. |
 | **You command, you don't pilot** | The player is fleet intelligence; the camera is its sensorium. Orders, not twitch. | Direct flight-sim piloting of a single ship. |
 | **The universe pushes back** | Environments are simulated and reactive - they respond to your tactics and become hazards or tools. | Static skyboxes and inert "decoration" hazards. |
-| **Salvage over manufacture** | Capturing and mastering enemy ships is the smart economy; building is the desperate one. | Pure factory economies with infinite reinforcements. |
+| **Salvage over manufacture** | Capturing and mastering enemy ships is the smart economy; building is the desperate one. Captured ships join your fleet without paying their full MU cost. | Pure factory economies with infinite reinforcements. |
 | **Web-first, no install** | It runs in a browser tab at a URL, on every commit. | Desktop-only, heavyweight installers as the primary path. |
 
 ### Theme
@@ -117,7 +117,7 @@ flowchart LR
     A[Start: Ark + starter fleet] --> B{Sector Map}
     B -->|jump| C[Encounter Node]
     C --> D[Tactical Battle / Salvage / Event]
-    D --> E[Resolve: resources, salvage, crew, damage]
+    D --> E[Resolve: MU, salvaged ships, crew, damage]
     E --> F{Ark survived?}
     F -->|no| G[Run ends - bank meta-progress]
     F -->|yes| B
@@ -130,7 +130,7 @@ flowchart LR
 
 ### Within a run (scarce, tense, permadeath)
 
-- **Resources** are scarce and carried between encounters: *Salvage* (raw
+- **Resources** are scarce and carried between encounters: *Matter Units* (raw
   matter for repair/build), *Power Cells* (deployable energy reserves),
   *Crew* (the rarest resource - people don't respawn), and *Intel* (unlocks
   research within the run).
@@ -139,11 +139,34 @@ flowchart LR
 - **Choices compound:** repair vs. build vs. capture vs. flee. Every encounter
   leaves you weaker or richer, and the map forces you deeper.
 
+### Mission objectives (per encounter)
+
+Every tactical encounter (an "encounter node" in the run map) has:
+
+- **Main objective** - the win condition. The default is **destroy the enemy
+  mothership**; variants will land over time: defend a friendly station, capture
+  a key ship intact, escort a convoy, raid a supply depot, survive a fixed
+  duration.
+- **Bonus objective** - an optional secondary, e.g. "lose no harvester,"
+  "capture two enemy frigates," "kill the enemy commander unit," "complete
+  under N minutes." Completing it pays out extra **research points** on top of
+  the base reward.
+- **Rewards** - **Matter Units** carried back to the Ark (the in-run currency,
+  banked into the player's MU pool) and **research points** banked toward the
+  meta-progression tree (between runs).
+
+Failing the main objective ends the encounter (and usually the run, when the
+Ark is the failed target).
+
 ### Between runs (meta-progression)
 
 - A **persistent research tree** ([§5](#5-crew-capture--research)) unlocks
-  across runs: new starting loadouts, the *ability* to operate certain captured
-  alien hull classes, crew doctrines, Ark modules.
+  across runs: new starting loadouts (the **specialized hull classes**, locked
+  at run start until unlocked), the *ability* to operate certain captured alien
+  hull classes, crew doctrines, Ark modules.
+- Players spend **research points** earned from mission rewards (main + bonus
+  objectives). Each unlock is an *access* gate (you can now build / crew /
+  research this thing), not a flat buff.
 - Meta-progression is about **capability and knowledge, not raw power** - you
   unlock *understanding* of exotic tech, not stat boosts. This keeps each run a
   test of tactics, not a grind wall.
@@ -163,13 +186,13 @@ individually simulated** ([§6](#6-ship-simulation-model)).
 | **Strike craft** (fighters/bombers) | Fast harassment, anti-strike-craft | Cheap-ish, crewed by few, attritable but still not free. |
 | **Frigates** | Workhorse line combatants; specialized variants (ion, missile, support, **boarding**) | The backbone. Boarding frigates enable capture. |
 | **Capital ships** | Heavy hitters, rich subsystem trees | Expensive, slow, devastating; prime capture targets. |
-| **Utility** (collectors, sensors, repair) | Economy & support | Salvage collection, forward sensor pickets. |
+| **Utility** (collectors, sensors, repair) | Economy & support | Matter Units collection, forward sensor pickets. |
 
 ### Building is the *desperate* economy
 
 Building at the Ark is intentionally painful:
 
-- **Costly** in Salvage *and* Crew (a new hull needs people to run it).
+- **Costly** in Matter Units *and* Crew (a new hull needs people to run it).
 - **Slow** - construction takes real encounter time; you can't build mid-fight
   and expect it to arrive.
 - **Dangerous** - an active construction bay forces the Ark to lower defenses /
@@ -228,7 +251,7 @@ checksum): free crew = carrier capacity minus the requirement of every ship and
 queued build. The starting carrier provides **2000 ops + 100 pilots**. Per-class
 requirements: fighter 1 pilot, bomber 2 pilots; corvette 10 ops, resourcer 3 ops,
 frigate (general/missile) 100 ops, capital destroyer 400 ops; the carrier
-requires none (it provides). A build is allowed only when both salvage **and**
+requires none (it provides). A build is allowed only when both matter **and**
 free crew of the right kind suffice; queued builds reserve their crew up front so
 production can't over-commit the roster.
 
@@ -274,6 +297,39 @@ Research spans **within-run** (Intel unlocks tactical capability this run) and
 > Design rule: meta-progression unlocks **knowledge and access**, not flat
 > stat inflation. The fun is "now I can crew a Vaered dreadnought," not "+10%
 > damage."
+
+### Mission-driven progression: from basics to specialized fleet
+
+A new player starts a run with the **bare minimum**: the **Ark / mothership**
+itself, **harvesters** (Resourcer class) to mine Matter Units from asteroid
+fields, and **fighters** as the generalist combat hull. Every other ship class
+is **locked** until the player unlocks it in the research tree using **research
+points** earned from missions ([§3](#mission-objectives-per-encounter)).
+
+Indicative unlock chain (subject to balance):
+
+| Tier | Unlock | Why you want it |
+|---|---|---|
+| Start | **Mothership**, **Harvester**, **Fighter** | generalist baseline; the run viable but vanilla |
+| 1 | **Bomber** | heavy unguided ordnance against capital-grade hulls |
+| 1 | **Corvette** | tougher gun line for swarms of enemy strike craft |
+| 2 | **Missile frigate** | long-range standoff and homing kills on capitals |
+| 2 | **General frigate** | line ship, screening, anti-frigate work |
+| 3 | **Capital destroyer** | big-gun anchor for mothership engagements |
+| 3 | **Xenotech doctrines** | crew enough captured alien ships to use them |
+
+Each tier becomes accessible once enough research points have been banked; the
+player chooses the *order* of unlocks (Bomber-first vs Corvette-first changes
+what the next mission's fleet composition can answer). The unlock graph is
+deliberately wider than deep so each playthrough's tech path can feel
+different.
+
+The mission ramp pairs with this: early enemy strike groups should be
+fighter-counterable, mid-game missions field corvettes and frigates that
+*demand* the player has unlocked their counters, and the final missions field
+capital + carrier engagements that only a fully-stocked tech tree can answer.
+Until those higher tiers exist in code, the prototype demo uses the full ship
+suite at run start; the tier-gating lands with the campaign meta-loop.
 
 ---
 
@@ -502,7 +558,7 @@ volumetric, and dangerous - not a backdrop. (Ships are the exception: they are
 |---|---|---|
 | **Voxel nebulas** | Sparse volumetric density field (3D noise / brick grid), raymarched | Sensor occlusion, concealment, fuel for ion storms; some are flammable/charged. |
 | **Dust clouds** | Lighter-density volumetric fields | Soft cover, visual depth, mild sensor scatter. |
-| **3D asteroids** | Procedural meshes (displaced icospheres / marching cubes on a voxel field), instanced fields | Cover, collision hazards, Salvage sources, line-of-sight blockers. |
+| **3D asteroids** | Procedural meshes (displaced icospheres / marching cubes on a voxel field), instanced fields | Cover, collision hazards, Matter Units sources, line-of-sight blockers. |
 | **Planets** | Procedural sphere shaders (noise terrain, atmosphere scattering) | Backdrops, gravity, mission anchors; rarely entered. |
 | **Gravity wells** | Scalar/vector field over the encounter | Bend trajectories, slingshots, traps; affect missile/strike-craft paths. |
 | **Pulsars** | Rotating volumetric beam + periodic EM sweep | Timed sensor/comms disruption; rhythmic hazard windows. |
@@ -724,7 +780,7 @@ the target as the order set lands:
 **Pause is single-player, local, and active.** It stops *advancing* the
 fixed-step sim (no movement, harvest, or build progress; the camera and UI keep
 working), but **orders still take effect immediately**: you can pause, queue
-builds and moves (salvage debits and the build queue updates right away), then
+builds and moves (matter debits and the build queue updates right away), then
 resume to watch them play out. Mechanically, pause keeps applying queued commands
 each frame (`World::apply_commands`) without calling `World::step`. It does not
 pause "the world" for anyone else; lockstep multiplayer will need a synchronized
@@ -799,9 +855,9 @@ ship pulled off a non-combat target the moment a real threat opens fire on it).
 **Enemy commander AI (current build).** The sim runs a two-level AI: the
 per-ship stance behavior above, plus a strategic **commander** that owns the
 enemy team's economy and coordinates raids. The enemy team has its own
-`enemy_salvage` pool and `enemy_build_queue`; each step the commander:
+`enemy_matter` pool and `enemy_build_queue`; each step the commander:
 **dispatches** idle harvesters to the nearest live resource node; **queues a
-build** (rotating Fighter / Corvette / Bomber) when the line is idle, salvage
+build** (rotating Fighter / Corvette / Bomber) when the line is idle, matter
 allows, and the armed-enemy count is below `ENEMY_FORCE_CAP`; **forms a raid
 wave** by pointing every idle, healthy armed enemy at the player mothership
 once `WAVE_SIZE_MIN` are free (reinforcements join while the wave's target
@@ -867,7 +923,7 @@ The brief calls for a **simple, immediate-mode GUI** layered on wgpu. We use
   hazard fields (toggleable), threat indicators.
 - **Sensors/minimap (3D-aware):** a readable representation of the volumetric
   battlespace and contacts.
-- **Run/Resource bar:** Salvage, Power Cells, Crew, Intel; Ark status &
+- **Run/Resource bar:** Matter Units, Power Cells, Crew, Intel; Ark status &
   build queue.
 - **Dev overlays (debug builds):** ECS inspector, field heatmaps, frame/sim
   timing, network desync checksums.
@@ -1419,25 +1475,25 @@ Three deliverables, all live on GitHub Pages from the first commit:
   set X/Z on the disk, drag for altitude, ships move there with simple
   Newtonian-ish steering on the **fixed-timestep sim** with render
   interpolation.
-- **Salvage gathering (prototype economy):** a seeded belt of **procedural
+- **Matter Units gathering (prototype economy):** a seeded belt of **procedural
   asteroids** (displaced icospheres, instanced; the permitted procedural case,
-  [§14](#14-asset-strategy-static-vs-procedural)) acts as salvage sources. With a
+  [§14](#14-asset-strategy-static-vs-procedural)) acts as matter sources. With a
   **resourcer** selected, clicking an asteroid sends it to harvest; it fills its
-  cargo, returns to the mothership to deposit, and the banked **Salvage** counter
+  cargo, returns to the mothership to deposit, and the banked **Matter Units** counter
   rises. All gather/harvest/deposit state lives in the deterministic sim (node
-  amounts and the salvage pool are in the checksum); asteroid positions/amounts
+  amounts and the matter pool are in the checksum); asteroid positions/amounts
   are seeded so they are identical across peers.
 - **Production (prototype build menu):** a full-screen **Build** overlay (opened
   from the HUD) lists the ship classes down a sidebar and shows the selected one
   as a slowly rotating **3D preview** (the wgpu canvas renders it behind the
   overlay's transparent centre while in-world input is suspended). A build needs
-  both **salvage and free crew** ([§5](#5-crew-capture--research)); unaffordable
-  options are greyed and the confirm button disables. Salvage is debited up front
+  both **matter and free crew** ([§5](#5-crew-capture--research)); unaffordable
+  options are greyed and the confirm button disables. Matter Units is debited up front
   (a `Build` command), the front of the queue
   accrues build time each fixed step, and on completion the ship spawns next to
   the carrier at a spread angle. The queue and per-item progress are deterministic
   sim state (in the checksum); the menu, like all controls, drives the same
-  command path on desktop and touch. A HUD readout shows banked salvage, the crew
+  command path on desktop and touch. A HUD readout shows banked matter, the crew
   pools, and the current build. This closes the gather -> bank -> build economy
   loop ([§3](#3-core-loop--roguelike-campaign)).
 - **Faction livery:** hulls are baked neutral grey with a livery mask in the
@@ -1529,6 +1585,9 @@ complete.
 | Term | Meaning |
 |---|---|
 | **Ark** | The mothership; command/production/research anchor of a run. Its loss ends the run. |
+| **MU / Matter Units** | The in-run resource currency, mined from asteroid fields by harvesters and spent on builds at the Ark. |
+| **Research points** | Meta-progression currency awarded by missions (main + bonus objectives); spent between runs in the research tree. |
+| **Mission** | A single tactical encounter with a **main objective** (default: destroy enemy mothership) and an optional **bonus objective** that pays extra research points. |
 | **Move-disk** | Homeworld-style 3D move tool: set X/Z on a plane, drag vertically for altitude. |
 | **Sensors view** | Far-zoom abstracted tactical representation of the battlespace. |
 | **Lockstep** | Multiplayer model where all peers deterministically simulate the same state from shared commands. |

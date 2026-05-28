@@ -12,7 +12,7 @@
     "turnRateDeg": 70.0
   },
   "build": {
-    "salvage": 120.0,
+    "matter": 120.0,
     "time": 28.0
   },
   "cargo": null,

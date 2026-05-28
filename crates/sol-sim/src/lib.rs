@@ -30,7 +30,7 @@ pub const TICK_DT: f32 = 1.0 / TICK_HZ as f32;
 const SEPARATION_SPACING: f32 = 1.15;
 const SEPARATION_GAIN: f32 = 3.0;
 
-/// Salvage harvested per second while a resourcer sits in a node's gather range.
+/// Matter harvested per second while a resourcer sits in a node's gather range.
 const HARVEST_RATE: f32 = 60.0;
 
 /// Crew complement a carrier (the Ark) contributes to the player's pools. Other
@@ -232,10 +232,10 @@ pub struct Blueprint {
     /// Hull points at full health. Combat (later phase) drains the entity's
     /// `hull`; the HUD reads `hull / max_hull` for the health bar.
     pub max_hull: f32,
-    /// Salvage cargo capacity. Only resourcers carry (> 0); a ship with zero
+    /// Matter cargo capacity. Only resourcers carry (> 0); a ship with zero
     /// capacity cannot accept a gather order.
     pub cargo: f32,
-    /// Salvage cost to build this class at the mothership.
+    /// Matter cost to build this class at the mothership.
     pub cost: f32,
     /// Build time in seconds (demo-tuned; shorter than the eventual values).
     pub build_time: f32,
@@ -372,7 +372,7 @@ impl ShipRegistry {
         let mut blueprints = HashMap::new();
         for (class, mass, max_speed, accel, turn_rate_deg, radius, max_hull, cargo) in rows {
             let (max_shield, shield_regen) = shield_for(class);
-            // Crew requirement (of the class's CrewKind), salvage cost, and build
+            // Crew requirement (of the class's CrewKind), matter cost, and build
             // seconds. Carriers require no crew: they PROVIDE the pool (see
             // CARRIER_CREW_*). Demo-tuned; eventual values live in ship.json.
             let (crew, cost, build_time, sensor_range): (u32, f32, f32, f32) = match class {
@@ -464,11 +464,11 @@ impl Patrol {
     }
 }
 
-/// Stable id for a resource node (asteroid / salvage site).
+/// Stable id for a resource node (asteroid / matter site).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeId(pub u32);
 
-/// A harvestable salvage site. Positions/amounts are seeded (deterministic for
+/// A harvestable matter site. Positions/amounts are seeded (deterministic for
 /// gameplay); resourcers drain `amount` down to zero. Purely sim state.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ResourceNode {
@@ -492,7 +492,7 @@ pub struct Gather {
 
 /// A ship under construction at the mothership: which class, and how much build
 /// time has accrued. The queue is processed front-first in [`World::step`];
-/// salvage is paid up front when the build is enqueued.
+/// matter is paid up front when the build is enqueued.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BuildItem {
     pub class: ShipClass,
@@ -603,7 +603,7 @@ pub enum Command {
     SetStance { entity: EntityId, stance: Stance },
     /// Send a resourcer to harvest a node (ignored for ships with no cargo).
     Gather { entity: EntityId, node: NodeId },
-    /// Queue a ship of `class` for construction at the mothership; salvage is
+    /// Queue a ship of `class` for construction at the mothership; matter is
     /// debited immediately (ignored if unaffordable).
     Build { class: ShipClass },
 }
@@ -621,13 +621,13 @@ pub struct World {
     /// Transient combat effects from the last step, drained by the renderer.
     /// Output only; cleared at the start of every [`World::step`].
     pub combat_events: Vec<CombatEvent>,
-    /// Harvestable salvage sites (asteroids); drained by resourcers.
+    /// Harvestable matter sites (asteroids); drained by resourcers.
     pub resource_nodes: Vec<ResourceNode>,
-    /// Salvage banked at the mothership (the player's resource pool).
-    pub salvage: f32,
-    /// Enemy team's salvage pool, fed by enemy harvesters depositing at the
+    /// Matter banked at the mothership (the player's resource pool).
+    pub matter: f32,
+    /// Enemy team's matter pool, fed by enemy harvesters depositing at the
     /// enemy mothership. Spent by the commander AI to queue new enemy builds.
-    pub enemy_salvage: f32,
+    pub enemy_matter: f32,
     /// Ships under construction at the mothership (front item builds first).
     pub build_queue: Vec<BuildItem>,
     /// Enemy mothership's build queue, populated by the commander AI.
@@ -655,8 +655,8 @@ impl World {
             projectiles: Vec::new(),
             combat_events: Vec::new(),
             resource_nodes: Vec::new(),
-            salvage: 0.0,
-            enemy_salvage: 0.0,
+            matter: 0.0,
+            enemy_matter: 0.0,
             build_queue: Vec::new(),
             enemy_build_queue: Vec::new(),
             enemy_build_index: 0,
@@ -731,10 +731,10 @@ impl World {
         (co as i32 - uo as i32, cp as i32 - up as i32)
     }
 
-    /// Whether a build of `class` can be afforded right now (salvage + crew).
+    /// Whether a build of `class` can be afforded right now (matter + crew).
     pub fn can_build(&self, class: ShipClass) -> bool {
         let bp = self.registry.get(class);
-        if bp.cost <= 0.0 || self.salvage < bp.cost {
+        if bp.cost <= 0.0 || self.matter < bp.cost {
             return false;
         }
         let (free_ops, free_pilots) = self.crew_free();
@@ -816,7 +816,7 @@ impl World {
     /// economy. Stateless across steps (decisions derive from current world
     /// state); deterministic and side-effect free outside the sim.
     ///   - Dispatches idle enemy harvesters to the nearest live resource node.
-    ///   - When the enemy build queue is empty and enough salvage has accrued,
+    ///   - When the enemy build queue is empty and enough matter has accrued,
     ///     queues a new combat ship, rotating between Fighter/Corvette/Bomber.
     ///
     /// Combat-ship movement is still driven by the per-ship enemy AI block
@@ -923,8 +923,8 @@ impl World {
                 [ShipClass::Fighter, ShipClass::Corvette, ShipClass::Bomber];
             let class = CLASSES[(self.enemy_build_index as usize) % CLASSES.len()];
             let cost = self.registry.get(class).cost;
-            if self.enemy_salvage >= cost {
-                self.enemy_salvage -= cost;
+            if self.enemy_matter >= cost {
+                self.enemy_matter -= cost;
                 self.enemy_build_queue.push(BuildItem {
                     class,
                     progress: 0.0,
@@ -1038,10 +1038,10 @@ impl World {
                     }
                 }
                 Command::Build { class } => {
-                    // Affordable means salvage AND free crew (queued builds
+                    // Affordable means matter AND free crew (queued builds
                     // already count toward used crew, so this can't over-commit).
                     if self.can_build(class) {
-                        self.salvage -= self.registry.get(class).cost;
+                        self.matter -= self.registry.get(class).cost;
                         self.build_queue.push(BuildItem {
                             class,
                             progress: 0.0,
@@ -1603,7 +1603,7 @@ impl World {
         }
 
         // 4) Resource harvest / deposit, in a separate pass so the node list and
-        // the salvage pool aren't aliased with the entity iteration. Stable
+        // the matter pool aren't aliased with the entity iteration. Stable
         // (entity index) order keeps it deterministic.
         for i in 0..self.entities.len() {
             let Some(g) = self.entities[i].gather else {
@@ -1624,8 +1624,8 @@ impl World {
                 if let Some((dpos, dr)) = team_depot {
                     if (pos - dpos).length() <= dr + ship_r + 2.5 {
                         match team {
-                            Team::Enemy => self.enemy_salvage += g.carrying,
-                            _ => self.salvage += g.carrying,
+                            Team::Enemy => self.enemy_matter += g.carrying,
+                            _ => self.matter += g.carrying,
                         }
                         let empty = self
                             .resource_nodes
@@ -1742,8 +1742,8 @@ impl World {
             h = fnv1a(h, az.to_bits());
             h = fnv1a(h, e.gather.map(|g| g.carrying).unwrap_or(0.0).to_bits());
         }
-        h = fnv1a(h, self.salvage.to_bits());
-        h = fnv1a(h, self.enemy_salvage.to_bits());
+        h = fnv1a(h, self.matter.to_bits());
+        h = fnv1a(h, self.enemy_matter.to_bits());
         if let Some(w) = self.enemy_wave {
             h = fnv1a(h, 1);
             h = fnv1a(h, w.target.0);
@@ -2410,7 +2410,7 @@ mod tests {
                 Vec3::new(0.0, 0.0, 5.0 + i as f32),
             );
         }
-        w.enemy_salvage = 10_000.0; // plenty
+        w.enemy_matter = 10_000.0; // plenty
         w.step(TICK_DT);
         assert!(
             w.enemy_build_queue.is_empty(),
@@ -2441,21 +2441,21 @@ mod tests {
     fn enemy_commander_funds_a_build_when_affordable() {
         let mut w = World::new(63);
         w.spawn_class(ShipClass::Carrier, Team::Enemy, Vec3::ZERO);
-        // Cheapest fighter (30 salvage); seed enough to fund one.
-        w.enemy_salvage = 100.0;
+        // Cheapest fighter (30 matter); seed enough to fund one.
+        w.enemy_matter = 100.0;
         w.step(TICK_DT);
         assert!(
             !w.enemy_build_queue.is_empty(),
             "commander should queue an affordable build"
         );
         assert!(
-            w.enemy_salvage < 100.0,
-            "queueing should debit the enemy salvage pool"
+            w.enemy_matter < 100.0,
+            "queueing should debit the enemy matter pool"
         );
     }
 
     #[test]
-    fn enemy_harvester_deposits_to_enemy_salvage() {
+    fn enemy_harvester_deposits_to_enemy_matter() {
         let mut w = World::new(51);
         w.spawn_class(ShipClass::Carrier, Team::Enemy, Vec3::new(100.0, 0.0, 0.0));
         let h = w.spawn_class(ShipClass::Resourcer, Team::Enemy, Vec3::new(95.0, 0.0, 8.0));
@@ -2466,11 +2466,11 @@ mod tests {
             w.step(TICK_DT);
         }
         assert!(
-            w.enemy_salvage > 0.0,
-            "enemy harvester should deposit to enemy salvage: {}",
-            w.enemy_salvage,
+            w.enemy_matter > 0.0,
+            "enemy harvester should deposit to enemy matter: {}",
+            w.enemy_matter,
         );
-        assert_eq!(w.salvage, 0.0, "player salvage should not change");
+        assert_eq!(w.matter, 0.0, "player matter should not change");
     }
 
     #[test]
@@ -2596,7 +2596,7 @@ mod tests {
     }
 
     #[test]
-    fn resourcer_harvests_node_and_banks_salvage() {
+    fn resourcer_harvests_node_and_banks_matter() {
         let mut w = World::new(9);
         w.spawn_class(ShipClass::Carrier, Team::Player, Vec3::ZERO); // depot
         let r = w.spawn_class(ShipClass::Resourcer, Team::Player, Vec3::new(6.0, 0.0, 0.0));
@@ -2608,9 +2608,9 @@ mod tests {
         }
         assert_eq!(w.node(node).unwrap().amount, 0.0, "node not depleted");
         assert!(
-            (w.salvage - 150.0).abs() < 1.0,
-            "salvage not banked: {}",
-            w.salvage
+            (w.matter - 150.0).abs() < 1.0,
+            "matter not banked: {}",
+            w.matter
         );
         // Task clears once the node is exhausted.
         assert!(w.entity(r).unwrap().gather.is_none());
@@ -2643,10 +2643,10 @@ mod tests {
     }
 
     #[test]
-    fn build_spends_salvage_and_spawns_a_ship() {
+    fn build_spends_matter_and_spawns_a_ship() {
         let mut w = World::new(4);
         w.spawn_class(ShipClass::Carrier, Team::Player, Vec3::ZERO);
-        w.salvage = 500.0;
+        w.matter = 500.0;
         let before = w.entities.len();
         let cost = w.registry.get(ShipClass::Corvette).cost;
         w.enqueue(Command::Build {
@@ -2654,7 +2654,7 @@ mod tests {
         });
         w.step(TICK_DT);
         // Paid up front and queued.
-        assert_eq!(w.salvage, 500.0 - cost);
+        assert_eq!(w.matter, 500.0 - cost);
         assert_eq!(w.build_queue.len(), 1);
         // Finishes within its build time and spawns one ship.
         let bt = w.registry.get(ShipClass::Corvette).build_time;
@@ -2691,7 +2691,7 @@ mod tests {
         let mut w = World::new(4);
         w.spawn_class(ShipClass::Carrier, Team::Player, Vec3::ZERO);
         let id = w.spawn_class(ShipClass::Corvette, Team::Player, Vec3::ZERO);
-        w.salvage = 500.0;
+        w.matter = 500.0;
         let cost = w.registry.get(ShipClass::Fighter).cost;
         let tick0 = w.tick;
 
@@ -2705,7 +2705,7 @@ mod tests {
         w.apply_commands();
 
         // Build debited + queued immediately, but it has not progressed.
-        assert_eq!(w.salvage, 500.0 - cost);
+        assert_eq!(w.matter, 500.0 - cost);
         assert_eq!(w.build_queue.len(), 1);
         assert_eq!(w.build_queue[0].progress, 0.0);
         // Move order registered, but the ship has not moved and no tick elapsed.
@@ -2717,27 +2717,27 @@ mod tests {
     #[test]
     fn build_rejected_without_crew() {
         let mut w = World::new(4);
-        // No carrier means no crew pool, so even flush with salvage we can't build.
-        w.salvage = 1000.0;
+        // No carrier means no crew pool, so even flush with matter we can't build.
+        w.matter = 1000.0;
         w.enqueue(Command::Build {
             class: ShipClass::Fighter,
         });
         w.step(TICK_DT);
         assert!(w.build_queue.is_empty(), "built with no crew capacity");
-        assert_eq!(w.salvage, 1000.0, "salvage spent despite no crew");
+        assert_eq!(w.matter, 1000.0, "matter spent despite no crew");
     }
 
     #[test]
     fn build_rejected_when_unaffordable() {
         let mut w = World::new(4);
         w.spawn_class(ShipClass::Carrier, Team::Player, Vec3::ZERO);
-        w.salvage = 5.0; // far below any cost
+        w.matter = 5.0; // far below any cost
         w.enqueue(Command::Build {
             class: ShipClass::Fighter,
         });
         w.step(TICK_DT);
         assert!(w.build_queue.is_empty());
-        assert_eq!(w.salvage, 5.0);
+        assert_eq!(w.matter, 5.0);
     }
 
     #[test]

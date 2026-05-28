@@ -2,7 +2,7 @@
 
 The goal of Phase 1 is the first genuinely *playable* slice: a deterministic
 fixed-step sim driving a fleet of statically authored ships that you can
-**select**, **move** in true 3D, feed with a **resourcer** that gathers salvage,
+**select**, **move** in true 3D, feed with a **resourcer** that gathers matter,
 and grow by **producing** new hulls at a carrier. It runs in the browser and
 deploys to Pages on every push.
 
@@ -27,7 +27,7 @@ Pulled from `CLAUDE.md` and `design.md`. Every stage must respect these.
   `sol-app`, never in the sim.
 - **Static assets.** All 8 ships are authored **offline** (committed `model.glb` +
   `ship.json`) and compiled by `sol-shipc`. **Never** generate ship geometry or
-  textures at runtime. Salvage fields and environment are procedural (allowed).
+  textures at runtime. Matter Units fields and environment are procedural (allowed).
 - **Rendering reads the sim, never writes it.**
 - **Web-first.** WebGPU primary, WebGL2 fallback; everything must run in the
   browser, not just native.
@@ -61,12 +61,12 @@ class via an extended `sol-shipc gen`), replaced with real art from the editor
 later. Hardpoints are authored for schema completeness even though weapons do not
 fire in Phase 1. IDs are snake_case to match `test_interceptor`.
 
-| id | Taxonomy (§4) | Role | Mass (t) | Max spd | Turn (deg/s) | Build: salvage / crew / s | Special |
+| id | Taxonomy (§4) | Role | Mass (t) | Max spd | Turn (deg/s) | Build: matter / crew / s | Special |
 |---|---|---|---|---|---|---|---|
 | `fighter` | Strike craft | Anti-strike, harass | 18 | 140 | 120 | 30 / 2 / 12 | very nimble |
 | `bomber` | Strike craft | Anti-capital torpedoes | 30 | 110 | 80 | 50 / 3 / 18 | strike, less nimble |
 | `corvette` | Light line | Escort, point defense | 220 | 85 | 55 | 120 / 6 / 28 | bridges strike/frigate |
-| `resourcer` | Utility | Salvage collection | 140 | 60 | 40 | 80 / 3 / 22 | `cargo.capacity` 200 |
+| `resourcer` | Utility | Matter Units collection | 140 | 60 | 40 | 80 / 3 / 22 | `cargo.capacity` 200 |
 | `frigate_general` | Frigate | Workhorse line combatant | 4000 | 45 | 22 | 300 / 18 / 50 | backbone |
 | `frigate_missile` | Frigate (special) | Standoff missile variant | 4200 | 42 | 20 | 340 / 18 / 55 | missile hardpoints |
 | `capital_destroyer` | Capital | Heavy hitter | 16000 | 28 | 10 | 900 / 60 / 110 | wide turns |
@@ -85,8 +85,8 @@ These fields are added once, in Stage 1, and kept in sync across
 validator. `schemaVersion` goes `1 -> 2`; `test_interceptor` is migrated.
 
 - `mobility: { maxSpeed, accel, turnRateDeg }` - required; drives steering.
-- `build: { salvage, time }` - required; salvage cost and seconds to produce.
-- `cargo: { capacity }` - optional; salvage units a collector can carry.
+- `build: { matter, time }` - required; matter cost and seconds to produce.
+- `cargo: { capacity }` - optional; matter units a collector can carry.
 - `production: { bays }` - optional; concurrent build bays (carrier).
 
 The crew a ship needs is the existing `crew.min`; its **category** (ops vs
@@ -196,7 +196,7 @@ subsystem/power sim in M2).
 - Tasks:
   - [ ] Wire `egui` via `egui-wgpu` + `egui-winit` into the frame (the TODO at
         `sol-render/src/lib.rs:414`).
-  - [ ] Stub panels: resource readout (Salvage, Crew) and a selection list.
+  - [ ] Stub panels: resource readout (Matter Units, Crew) and a selection list.
 - Touches: `crates/sol-render/src/lib.rs`, `crates/sol-app/src/lib.rs`, Cargo deps.
 - Notes: confirm egui versions line up with the pinned `wgpu`.
 - DoD: an egui overlay draws over the scene on web and native without breaking the
@@ -242,25 +242,25 @@ subsystem/power sim in M2).
 
 ## Stage 8 - Resource gathering
 
-- Goal: a resourcer turns salvage in space into a team stockpile.
+- Goal: a resourcer turns matter in space into a team stockpile.
 - Tasks:
-  - [ ] Procedural salvage fields/wrecks as sim entities with a salvage amount
+  - [ ] Procedural matter fields/wrecks as sim entities with a matter amount
         (seeded, deterministic placement; this is environment, allowed).
   - [ ] Resourcer state machine: `ToField -> Mining -> ToDepot -> Depositing`,
         filling `cargo.capacity`, depositing at the carrier.
-  - [ ] Team `Salvage` stockpile in the sim (deterministic counter).
+  - [ ] Team `Matter Units` stockpile in the sim (deterministic counter).
   - [ ] `Harvest` command + simple auto-assign to the nearest field.
 - Touches: `crates/sol-sim` (economy + collector modules), `crates/sol-procgen`
   (field placement), `crates/sol-app` + HUD readout.
 - DoD: order a resourcer to harvest, watch cargo fill, deposit, and the team
-  Salvage counter climb in the HUD.
+  Matter Units counter climb in the HUD.
 
 ## Stage 9 - Production
 
-- Goal: spend salvage and crew to build new ships at the carrier.
+- Goal: spend matter and crew to build new ships at the carrier.
 - Tasks:
   - [ ] Carrier production queue with `production.bays` concurrency.
-  - [ ] `Build` command: if the team has enough `Salvage` and free crew of the
+  - [ ] `Build` command: if the team has enough `Matter Units` and free crew of the
         ship's category, enqueue and allocate the crew; progress over
         `build.time`; on completion spawn near the carrier and join the fleet.
   - [ ] Team crew **roster** (`Ops` + `Pilots`, free vs allocated); building
@@ -269,7 +269,7 @@ subsystem/power sim in M2).
 - Touches: `crates/sol-sim` (production module), `crates/sol-app` + egui build menu.
 - Notes: the design's "building lowers defenses / diverts power" trade-off is
   deferred; Phase 1 uses cost + time + queue only.
-- DoD: select the carrier, build a fighter, see Salvage drop and a Pilot get
+- DoD: select the carrier, build a fighter, see Matter Units drop and a Pilot get
   allocated from the roster, the timer run, and the new ship appear and be
   selectable (on desktop and from the mobile panel).
 
@@ -281,13 +281,13 @@ subsystem/power sim in M2).
 
 - Goal: prove the whole spine end to end and lock determinism.
 - Tasks:
-  - [ ] A starting scenario: one carrier, one resourcer, a salvage field, a few
+  - [ ] A starting scenario: one carrier, one resourcer, a matter field, a few
         fighters; the loop is harvest -> build -> select -> move.
   - [ ] Headless determinism harness: same seed + command log produces identical
         end-state checksums over many ticks.
   - [ ] Tune mobility and economy numbers for feel; pass `fmt`/`clippy`/`test`.
 - Touches: workspace-wide; a small scenario in `sol-app`, tests in `sol-sim`.
-- DoD: on the Pages URL you can harvest salvage, build a ship, box-select the
+- DoD: on the Pages URL you can harvest matter, build a ship, box-select the
   fleet, and issue a 3D move order, all on the deterministic 30 Hz sim.
 
 ---

@@ -594,7 +594,7 @@ impl App {
             )];
             #[cfg(target_arch = "wasm32")]
             {
-                set_resources(self.world.salvage, 0.0);
+                set_resources(self.world.matter, 0.0);
                 set_crew(&self.world);
                 update_build_overlay(&self.world, class);
             }
@@ -1027,7 +1027,7 @@ impl App {
         // Resource + crew + build HUD readouts (web).
         #[cfg(target_arch = "wasm32")]
         {
-            set_resources(self.world.salvage, carrying_total);
+            set_resources(self.world.matter, carrying_total);
             set_crew(&self.world);
             let status = match self.world.build_queue.first() {
                 Some(b) => {
@@ -2209,7 +2209,7 @@ fn spawn_demo_fleet(world: &mut World) {
     }
 
     // Enemy mothership across the map with two harvesters nearby; the commander
-    // AI will dispatch them to gather salvage and fund new builds.
+    // AI will dispatch them to gather matter and fund new builds.
     world.spawn_class(
         ShipClass::Carrier,
         Team::Enemy,
@@ -2305,7 +2305,7 @@ fn livery_color(class: ShipClass, team: Team) -> [f32; 4] {
     }
 }
 
-/// Position of the player's mothership (the salvage depot), if any.
+/// Position of the player's mothership (the matter depot), if any.
 fn carrier_pos(world: &World) -> Option<Vec3> {
     world
         .entities
@@ -2314,7 +2314,7 @@ fn carrier_pos(world: &World) -> Option<Vec3> {
         .map(|e| e.transform.pos)
 }
 
-/// Seed a belt of harvestable salvage sites around the fleet (deterministic;
+/// Seed a belt of harvestable matter sites around the fleet (deterministic;
 /// see `sol_procgen::generate_resource_field`).
 fn spawn_resource_field(world: &mut World) {
     for site in sol_procgen::generate_resource_field(0x5EA0_5005, 14) {
@@ -2851,7 +2851,7 @@ fn show_build_overlay(show: bool) {
 
 /// Per-frame build-overlay refresh: highlight the previewed class, dim the
 /// classes the player can't afford, fill the info line, and enable/disable the
-/// confirm button by affordability (salvage + crew).
+/// confirm button by affordability (matter + crew).
 #[cfg(target_arch = "wasm32")]
 fn update_build_overlay(world: &World, preview: ShipClass) {
     let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
@@ -2871,7 +2871,7 @@ fn update_build_overlay(world: &World, preview: ShipClass) {
     };
     if let Some(el) = doc.get_element_by_id("sol-bo-info") {
         el.set_text_content(Some(&format!(
-            "{}    cost {}    crew {} {}    build {}s",
+            "{}    cost {} MU    crew {} {}    build {}s",
             class_label(preview),
             bp.cost as i64,
             bp.crew,
@@ -2948,18 +2948,16 @@ fn set_stance_ui(value: &str, disabled: bool) {
     }
 }
 
-/// Update the resource HUD readout: banked salvage and salvage in transit.
+/// Update the resource HUD readout: banked Matter Units (MU) plus any cargo in
+/// transit on returning harvesters.
 #[cfg(target_arch = "wasm32")]
-fn set_resources(salvage: f32, in_transit: f32) {
+fn set_resources(matter: f32, in_transit: f32) {
     if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
         if let Some(el) = doc.get_element_by_id("sol-resources") {
             let text = if in_transit > 0.5 {
-                format!(
-                    "Salvage: {}  (+{} en route)",
-                    salvage as i64, in_transit as i64
-                )
+                format!("MU: {}  (+{} en route)", matter as i64, in_transit as i64)
             } else {
-                format!("Salvage: {}", salvage as i64)
+                format!("MU: {}", matter as i64)
             };
             el.set_text_content(Some(&text));
         }

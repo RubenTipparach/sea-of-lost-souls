@@ -163,7 +163,7 @@ pub fn generate_background(seed: u64, radius: f32) -> Background {
     }
 }
 
-/// A seeded salvage site: where an asteroid sits, how much it holds, and its
+/// A seeded matter site: where an asteroid sits, how much it holds, and its
 /// footprint radius. Positions/amounts are gameplay-affecting, so they are
 /// deterministic from the seed (identical across peers); only the visual rock
 /// mesh is elaborated freely by the renderer.
@@ -173,7 +173,7 @@ pub struct ResourceSite {
     pub radius: f32,
 }
 
-/// Generate `count` salvage sites in a rough belt around the origin, seeded from
+/// Generate `count` matter sites in a rough belt around the origin, seeded from
 /// `seed`. Deterministic: the same seed yields the same field on every peer, so
 /// it is safe to drive gameplay (see `design.md` §7).
 pub fn generate_resource_field(seed: u64, count: usize) -> Vec<ResourceSite> {

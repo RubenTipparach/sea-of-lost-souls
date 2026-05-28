@@ -139,7 +139,7 @@ fn validate_gameplay_stats(def: &ShipDef) -> anyhow::Result<()> {
         }
     }
     let b = &def.build;
-    for (field, v) in [("build.salvage", b.salvage), ("build.time", b.time)] {
+    for (field, v) in [("build.matter", b.matter), ("build.time", b.time)] {
         if !v.is_finite() || v < 0.0 {
             bail!("{field} must be finite and >= 0 (got {v})");
         }

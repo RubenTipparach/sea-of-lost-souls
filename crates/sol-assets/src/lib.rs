@@ -53,10 +53,13 @@ pub struct Mobility {
     pub turn_rate_deg: f32,
 }
 
-/// Production cost: salvage spent and seconds to build at a carrier.
+/// Production cost: matter units (MU) spent and seconds to build at a carrier.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Build {
-    pub salvage: f32,
+    /// MU cost (the in-game resource). `"salvage"` is accepted as an alias on
+    /// read for older authored `ship.json` files.
+    #[serde(alias = "salvage")]
+    pub matter: f32,
     pub time: f32,
 }
 
@@ -182,7 +185,7 @@ mod tests {
         assert_eq!(def.mobility.max_speed, 140.0);
         assert_eq!(def.mobility.accel, 80.0);
         assert_eq!(def.mobility.turn_rate_deg, 120.0);
-        assert_eq!(def.build.salvage, 30.0);
+        assert_eq!(def.build.matter, 30.0);
         assert_eq!(def.build.time, 12.0);
         assert!(def.cargo.is_none());
         assert!(def.production.is_none());
