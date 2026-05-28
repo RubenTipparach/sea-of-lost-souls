@@ -731,7 +731,12 @@ impl World {
             target: None,
             attack_target: None,
             weapon_cooldown: 0.0,
-            stance: Stance::Defensive,
+            // Motherships and harvesters default to Passive so they never go off
+            // to hunt; the commander AI / SOS / explicit orders move them.
+            stance: match ship.class {
+                ShipClass::Carrier | ShipClass::Resourcer => Stance::Passive,
+                _ => Stance::Defensive,
+            },
             anchor: Some(transform.pos),
         });
         id

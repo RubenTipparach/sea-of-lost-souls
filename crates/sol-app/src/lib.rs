@@ -15,6 +15,8 @@ use sol_render::{
 };
 #[cfg(target_arch = "wasm32")]
 use sol_sim::CrewKind;
+#[cfg(target_arch = "wasm32")]
+use sol_sim::Stance;
 use sol_sim::{CombatEvent, Command, EntityId, Patrol, ShipClass, Team, WeaponKind, World};
 
 /// Group-move arrangement applied by [`App::issue_move`]. Local UI state only
@@ -1041,7 +1043,8 @@ impl App {
                 None => String::new(),
             };
             set_build_status(&status);
-            set_stance_label(&self.selected_stance_label());
+            let (sv, sd) = self.selected_stance_ui();
+            set_stance_ui(sv, sd);
         }
         #[cfg(not(target_arch = "wasm32"))]
         let _ = carrying_total;
@@ -1801,21 +1804,36 @@ impl App {
         set_sensors_ui(self.sensors_open);
     }
 
-    /// Label for the Stance HUD button: the common stance of the selection,
-    /// `Mixed` when they disagree, `-` when nothing is selected.
+    /// Stance dropdown state for the current selection: `(value, disabled)`.
+    /// `value` is one of `passive`/`defensive`/`aggressive`/`mixed`; `disabled`
+    /// is true when nothing is selected.
     #[cfg(target_arch = "wasm32")]
-    fn selected_stance_label(&self) -> String {
+    fn selected_stance_ui(&self) -> (&'static str, bool) {
         let mut iter = self
             .selected
             .iter()
             .filter_map(|id| self.world.entity(*id).map(|e| e.stance));
         let Some(first) = iter.next() else {
-            return "Stance: -".to_string();
+            return ("defensive", true);
         };
         if iter.all(|s| s == first) {
-            format!("Stance: {}", first.label())
+            let v = match first {
+                Stance::Passive => "passive",
+                Stance::Defensive => "defensive",
+                Stance::Aggressive => "aggressive",
+            };
+            (v, false)
         } else {
-            "Stance: Mixed".to_string()
+            ("mixed", false)
+        }
+    }
+
+    /// Assign a specific stance to every selected ship (from the HUD dropdown).
+    #[cfg(target_arch = "wasm32")]
+    fn set_selection_stance(&mut self, stance: Stance) {
+        for id in self.selected.clone() {
+            self.world
+                .enqueue(Command::SetStance { entity: id, stance });
         }
     }
 
@@ -2005,7 +2023,7 @@ impl App {
                 UiCmd::TogglePause => self.toggle_pause(),
                 UiCmd::ToggleFocus => self.toggle_focus(),
                 UiCmd::ToggleSensors => self.toggle_sensors(),
-                UiCmd::CycleStance => self.cycle_stance(),
+                UiCmd::SetStance(stance) => self.set_selection_stance(stance),
             }
         }
     }
@@ -2613,8 +2631,8 @@ enum UiCmd {
     ToggleFocus,
     /// Toggle the sensors-manager view.
     ToggleSensors,
-    /// Cycle the combat stance of every selected ship (Passive/Defensive/Aggressive).
-    CycleStance,
+    /// Set the combat stance of every selected ship from the dropdown.
+    SetStance(Stance),
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -2643,11 +2661,26 @@ fn wire_dom_controls() {
         ("sol-bo-pause", UiCmd::TogglePause),
         ("sol-focus", UiCmd::ToggleFocus),
         ("sol-sensors", UiCmd::ToggleSensors),
-        ("sol-stance", UiCmd::CycleStance),
     ] {
         if let Some(el) = doc.get_element_by_id(id) {
             let cb = Closure::<dyn FnMut()>::new(move || push_ui(cmd));
             let _ = el.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref());
+            cb.forget();
+        }
+    }
+    // Stance dropdown: change-event pushes SetStance with the chosen value.
+    if let Some(el) = doc.get_element_by_id("sol-stance") {
+        if let Ok(select) = el.dyn_into::<web_sys::HtmlSelectElement>() {
+            let s = select.clone();
+            let cb = Closure::<dyn FnMut()>::new(move || {
+                let stance = match s.value().as_str() {
+                    "passive" => Stance::Passive,
+                    "aggressive" => Stance::Aggressive,
+                    _ => Stance::Defensive,
+                };
+                push_ui(UiCmd::SetStance(stance));
+            });
+            let _ = select.add_event_listener_with_callback("change", cb.as_ref().unchecked_ref());
             cb.forget();
         }
     }
@@ -2881,12 +2914,17 @@ fn set_build_status(text: &str) {
     }
 }
 
-/// Update the Stance button's label from the current selection.
+/// Sync the Stance dropdown to the selection: `value` is the chosen option's
+/// id (or "mixed" when ships disagree); `disabled` greys out the select when
+/// nothing is selected.
 #[cfg(target_arch = "wasm32")]
-fn set_stance_label(text: &str) {
+fn set_stance_ui(value: &str, disabled: bool) {
     if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
         if let Some(el) = doc.get_element_by_id("sol-stance") {
-            el.set_text_content(Some(text));
+            if let Ok(sel) = el.dyn_into::<web_sys::HtmlSelectElement>() {
+                sel.set_value(value);
+                sel.set_disabled(disabled);
+            }
         }
     }
 }

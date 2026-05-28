@@ -81,7 +81,8 @@
         display: flex;
         gap: 8px;
       }
-      #sol-controls button {
+      #sol-controls button,
+      #sol-controls select {
         appearance: none;
         border: 1px solid #2b6cb0;
         border-radius: 8px;
@@ -93,6 +94,9 @@
         touch-action: none;
         user-select: none;
         -webkit-user-select: none;
+      }
+      #sol-controls select:disabled {
+        opacity: 0.55;
       }
       /* Highlight the box-select button while it is held. */
       #sol-box-select:active {
@@ -530,7 +534,12 @@
       <button id="sol-select-all" type="button">Select All</button>
       <button id="sol-box-select" type="button">Box Select</button>
       <button id="sol-formation" type="button">Form: Parade</button>
-      <button id="sol-stance" type="button">Stance: -</button>
+      <select id="sol-stance" aria-label="Stance for the selected ships" disabled>
+        <option value="passive">Passive</option>
+        <option value="defensive" selected>Defensive</option>
+        <option value="aggressive">Aggressive</option>
+        <option value="mixed" disabled>Mixed</option>
+      </select>
       <button id="sol-focus" type="button">Focus</button>
       <button id="sol-sensors" type="button">Sensors</button>
       <button id="sol-stop" type="button">Stop</button>
