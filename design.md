@@ -796,14 +796,21 @@ nearest armed ally**; when an armed Defensive/Aggressive ship is hit without a
 commanded target, it **retaliates against the attacker** (so an enemy combat
 ship pulled off a non-combat target the moment a real threat opens fire on it).
 
-**Enemy commander AI (current build).** The sim now runs a two-level AI: the
+**Enemy commander AI (current build).** The sim runs a two-level AI: the
 per-ship stance behavior above, plus a strategic **commander** that owns the
-enemy team's economy. The enemy team has its own `enemy_salvage` pool and
-`enemy_build_queue`; each step the commander dispatches idle enemy harvesters
-to the nearest live resource node and, when the line is idle and salvage
-allows, queues a new combat ship (rotating Fighter / Corvette / Bomber) at the
-enemy mothership. Enemy combat-ship movement is still driven by the per-ship
-enemy AI block (advance on the player mothership / standoff in sensor range). (Hull sections and subsystem disable
+enemy team's economy and coordinates raids. The enemy team has its own
+`enemy_salvage` pool and `enemy_build_queue`; each step the commander:
+**dispatches** idle harvesters to the nearest live resource node; **queues a
+build** (rotating Fighter / Corvette / Bomber) when the line is idle, salvage
+allows, and the armed-enemy count is below `ENEMY_FORCE_CAP`; **forms a raid
+wave** by pointing every idle, healthy armed enemy at the player mothership
+once `WAVE_SIZE_MIN` are free (reinforcements join while the wave's target
+lives, and the wave dissolves on target death); and **orders low-hull combat
+ships back** to the enemy mothership to recover. SOS now works for both teams,
+so enemy escorts respond to attacks on their own harvesters. An enemy whose
+current target is a non-combat ship **switches** to the attacker the moment a
+player combat ship opens fire on it. Player-commanded attack orders stay
+locked. (Hull sections and subsystem disable
 from [§6.3](#63-structure-hitboxes--positional-damage) are still deferred; facing
 is the first positional step.) Combat VFX read from a deterministic event
 stream the sim emits each step (`World::drain_combat_events`): the renderer

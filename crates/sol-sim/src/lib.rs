@@ -254,6 +254,25 @@ pub struct Blueprint {
 
 /// Seconds a ship must go un-hit before its shield starts to recharge.
 pub const SHIELD_REGEN_DELAY: f32 = 4.0;
+/// Maximum number of armed enemy ships the commander will keep around at once
+/// (so the fight stays winnable on a long demo).
+pub const ENEMY_FORCE_CAP: usize = 14;
+/// Hull fraction below which a combat ship breaks off and retreats to its
+/// mothership. Shields recharge there but hull does not.
+pub const LOW_HULL_RETREAT: f32 = 0.3;
+/// Minimum number of idle armed enemies needed to form a raid wave; reinforce-
+/// ments join an existing wave even below this threshold.
+pub const WAVE_SIZE_MIN: usize = 3;
+
+/// Active enemy raid wave: a coordinated group of armed enemy ships focused on
+/// a single player target (the mothership for the prototype). The commander
+/// adds idle armed enemies to the wave each step; the wave dissolves when the
+/// target is gone.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EnemyWave {
+    pub target: EntityId,
+    pub formed_tick: u64,
+}
 
 /// Per-class shield capacity and recharge rate (per second). Strike craft have
 /// none; capitals and the carrier carry heavy shields. Demo-tuned.
@@ -615,6 +634,8 @@ pub struct World {
     pub enemy_build_queue: Vec<BuildItem>,
     /// Counter the commander rotates through combat classes with on each queue.
     pub enemy_build_index: u32,
+    /// Active enemy raid wave, if any (commander state).
+    pub enemy_wave: Option<EnemyWave>,
     pub registry: ShipRegistry,
     pub rng: Rng,
     /// Number of fixed steps taken; part of the determinism checksum.
@@ -639,6 +660,7 @@ impl World {
             build_queue: Vec::new(),
             enemy_build_queue: Vec::new(),
             enemy_build_index: 0,
+            enemy_wave: None,
             registry: ShipRegistry::with_defaults(),
             rng: Rng::new(seed),
             tick: 0,
@@ -831,9 +853,72 @@ impl World {
                 });
             }
         }
-        // Build funding: rotate Fighter -> Corvette -> Bomber, queue the next
-        // affordable class when the line is idle.
-        if self.enemy_build_queue.is_empty() {
+        // Raid wave: keep the current wave alive while its target exists; if the
+        // line is idle (or the target was destroyed) and enough healthy combat
+        // ships are free, form a new wave on the player mothership. Eligible
+        // enemies in the wave are pointed at the target so the pursuit pass
+        // pulls them in as a coordinated group.
+        let player_carrier = self
+            .entities
+            .iter()
+            .find(|e| e.ship.class == ShipClass::Carrier && e.ship.team == Team::Player)
+            .map(|e| e.id);
+        let live_wave = self.enemy_wave.and_then(|w| {
+            if self.entities.iter().any(|e| e.id == w.target) {
+                Some(w)
+            } else {
+                None
+            }
+        });
+        let target_for_wave = live_wave.map(|w| w.target).or_else(|| {
+            let idle_armed = self
+                .entities
+                .iter()
+                .filter(|e| {
+                    e.ship.team == Team::Enemy
+                        && e.attack_target.is_none()
+                        && self.registry.get(e.ship.class).weapon.is_some()
+                })
+                .count();
+            if idle_armed >= WAVE_SIZE_MIN {
+                player_carrier
+            } else {
+                None
+            }
+        });
+        if let Some(target) = target_for_wave {
+            self.enemy_wave = Some(EnemyWave {
+                target,
+                formed_tick: self.tick,
+            });
+            for e in &mut self.entities {
+                if e.ship.team != Team::Enemy || e.attack_target.is_some() {
+                    continue;
+                }
+                let bp = self.registry.get(e.ship.class);
+                if bp.weapon.is_none() {
+                    continue;
+                }
+                if e.hull / bp.max_hull.max(1.0) < LOW_HULL_RETREAT {
+                    continue;
+                }
+                e.attack_target = Some(target);
+            }
+        } else {
+            self.enemy_wave = None;
+        }
+        // Force cap: stop building once the enemy already fields enough combat
+        // ships, so the fight stays winnable.
+        let armed_count = self
+            .entities
+            .iter()
+            .filter(|e| {
+                e.ship.team == Team::Enemy && self.registry.get(e.ship.class).weapon.is_some()
+            })
+            .count();
+        if self.enemy_build_queue.is_empty() && armed_count < ENEMY_FORCE_CAP {
+            // Build funding: rotate Fighter -> Corvette -> Bomber, queue the next
+            // affordable class when the line is idle.
             const CLASSES: [ShipClass; 3] =
                 [ShipClass::Fighter, ShipClass::Corvette, ShipClass::Bomber];
             let class = CLASSES[(self.enemy_build_index as usize) % CLASSES.len()];
@@ -845,6 +930,28 @@ impl World {
                     progress: 0.0,
                 });
                 self.enemy_build_index = self.enemy_build_index.wrapping_add(1);
+            }
+        }
+        // Retreat: low-hull combat ships break off and head back to recover near
+        // the enemy mothership (shields regen there even though hull doesn't).
+        let depot_pos = self
+            .entities
+            .iter()
+            .find(|e| e.ship.class == ShipClass::Carrier && e.ship.team == Team::Enemy)
+            .map(|e| e.transform.pos);
+        if let Some(depot) = depot_pos {
+            for e in &mut self.entities {
+                if e.ship.team != Team::Enemy {
+                    continue;
+                }
+                let bp = self.registry.get(e.ship.class);
+                if bp.weapon.is_none() {
+                    continue;
+                }
+                if e.hull / bp.max_hull.max(1.0) < LOW_HULL_RETREAT {
+                    e.attack_target = None;
+                    e.order = Some(depot);
+                }
             }
         }
     }
@@ -998,6 +1105,12 @@ impl World {
                 if e.ship.team != Team::Enemy {
                     continue;
                 }
+                // Commander-driven raid waves and SOS rallies set attack_target
+                // first; the pursuit pass will steer those ships, so the default
+                // "advance on player" block only governs ships without orders.
+                if e.attack_target.is_some() {
+                    continue;
+                }
                 let bp = self.registry.get(e.ship.class);
                 let max_d2 = bp.sensor_range * bp.sensor_range;
                 let my = e.transform.pos;
@@ -1055,7 +1168,7 @@ impl World {
             let Some(&(_, vteam, vpos)) = positions.iter().find(|v| v.0 == *vic_id) else {
                 continue;
             };
-            if vteam == *atk_team || vteam != Team::Player {
+            if vteam == *atk_team {
                 continue;
             }
             for e in &mut self.entities {
@@ -1074,20 +1187,18 @@ impl World {
             }
         }
         for e in &mut self.entities {
-            if e.ship.team != Team::Player {
-                continue;
-            }
             let weapon_range = self
                 .registry
                 .get(e.ship.class)
                 .weapon
                 .map(|w| w.range)
                 .unwrap_or(0.0);
-            // Pursue a commanded attack target, or (Aggressive only) the current
-            // auto-acquired target.
+            // Any team can pursue a commanded `attack_target` (the enemy
+            // commander uses this for raid waves and SOS responses). Aggressive
+            // player ships additionally pursue their auto-acquired target.
             let pursue_id = if e.attack_target.is_some() {
                 e.attack_target
-            } else if e.stance == Stance::Aggressive {
+            } else if e.ship.team == Team::Player && e.stance == Stance::Aggressive {
                 e.target
             } else {
                 None
@@ -1111,8 +1222,12 @@ impl World {
                 }
                 continue;
             }
-            // Defensive: nothing to engage, so drift back to the anchor.
-            if e.stance == Stance::Defensive && e.gather.is_none() && e.target.is_none() {
+            // Defensive (player team): nothing to engage, so drift to the anchor.
+            if e.ship.team == Team::Player
+                && e.stance == Stance::Defensive
+                && e.gather.is_none()
+                && e.target.is_none()
+            {
                 if let Some(a) = e.anchor {
                     e.order = Some(a);
                 }
@@ -1442,10 +1557,27 @@ impl World {
                     if let Some(p) = flee_to {
                         e.order = Some(p);
                     }
-                } else if e.attack_target.is_none() {
-                    if let Some((aid, ateam, _, _, _, _)) = attacker {
-                        if ateam != e.ship.team {
-                            e.attack_target = Some(aid);
+                } else if let Some((aid, ateam, _, _, _, aarmed)) = attacker {
+                    if ateam != e.ship.team {
+                        match e.attack_target {
+                            None => e.attack_target = Some(aid),
+                            Some(current) => {
+                                // Enemy AI: peel off a soft target the moment a
+                                // real threat opens fire (the commander tags
+                                // wave members onto the player carrier, but a
+                                // player combat ship attacking should take
+                                // priority). Player ships keep commanded focus.
+                                if e.ship.team == Team::Enemy && aarmed {
+                                    let current_armed = combatants
+                                        .iter()
+                                        .find(|c| c.0 == current)
+                                        .map(|c| c.5)
+                                        .unwrap_or(false);
+                                    if !current_armed {
+                                        e.attack_target = Some(aid);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1612,6 +1744,14 @@ impl World {
         }
         h = fnv1a(h, self.salvage.to_bits());
         h = fnv1a(h, self.enemy_salvage.to_bits());
+        if let Some(w) = self.enemy_wave {
+            h = fnv1a(h, 1);
+            h = fnv1a(h, w.target.0);
+            h = fnv1a(h, w.formed_tick as u32);
+            h = fnv1a(h, (w.formed_tick >> 32) as u32);
+        } else {
+            h = fnv1a(h, 0);
+        }
         for n in &self.resource_nodes {
             h = fnv1a(h, n.id.0);
             h = fnv1a(h, n.amount.to_bits());
@@ -2137,6 +2277,144 @@ mod tests {
         assert!(
             moved > 2.0 || killed,
             "aggressive should close on (or destroy) an out-of-range hostile: moved {moved}, killed {killed}",
+        );
+    }
+
+    #[test]
+    fn commander_forms_raid_wave_on_player_mothership() {
+        let mut w = World::new(81);
+        let carrier = w.spawn_class(
+            ShipClass::Carrier,
+            Team::Player,
+            Vec3::new(-200.0, 0.0, 0.0),
+        );
+        // Three idle enemy combat ships near the enemy mothership; the wave
+        // threshold is 3 so they should be conscripted on the first step.
+        w.spawn_class(ShipClass::Carrier, Team::Enemy, Vec3::new(200.0, 0.0, 0.0));
+        let ids: Vec<EntityId> = (0..3)
+            .map(|i| {
+                w.spawn_class(
+                    ShipClass::Fighter,
+                    Team::Enemy,
+                    Vec3::new(190.0, 0.0, i as f32 * 4.0),
+                )
+            })
+            .collect();
+        w.step(TICK_DT);
+        assert!(w.enemy_wave.is_some(), "wave should form on first step");
+        assert_eq!(w.enemy_wave.unwrap().target, carrier);
+        for id in ids {
+            assert_eq!(
+                w.entity(id).unwrap().attack_target,
+                Some(carrier),
+                "wave member should target the player carrier",
+            );
+        }
+    }
+
+    #[test]
+    fn enemy_switches_off_non_combat_when_combat_ship_attacks() {
+        let mut w = World::new(83);
+        // Player carrier (soft target) + a player corvette (combat).
+        let carrier = w.spawn_class(ShipClass::Carrier, Team::Player, Vec3::ZERO);
+        let corv = w.spawn_class(ShipClass::Corvette, Team::Player, Vec3::new(8.0, 0.0, 0.0));
+        // Enemy corvette already locked on the player carrier (e.g. by a wave).
+        let enemy = w.spawn_class(ShipClass::Corvette, Team::Enemy, Vec3::new(15.0, 0.0, 0.0));
+        w.entities
+            .iter_mut()
+            .find(|e| e.id == enemy)
+            .unwrap()
+            .attack_target = Some(carrier);
+        // Step until the player corvette hits the enemy and it pivots.
+        let mut switched = false;
+        for _ in 0..(TICK_HZ * 5) {
+            w.step(TICK_DT);
+            if let Some(ee) = w.entity(enemy) {
+                if ee.attack_target == Some(corv) {
+                    switched = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            switched,
+            "enemy should disengage from carrier to fight the corvette"
+        );
+    }
+
+    #[test]
+    fn enemy_sos_defends_harvester() {
+        let mut w = World::new(71);
+        w.spawn_class(ShipClass::Carrier, Team::Enemy, Vec3::new(100.0, 0.0, 0.0));
+        // An unarmed enemy harvester near the carrier, with an enemy escort
+        // a few units away. A player corvette opens fire on the harvester.
+        let _h = w.spawn_class(
+            ShipClass::Resourcer,
+            Team::Enemy,
+            Vec3::new(110.0, 0.0, 0.0),
+        );
+        let escort = w.spawn_class(
+            ShipClass::FrigateGeneral,
+            Team::Enemy,
+            Vec3::new(108.0, 0.0, 4.0),
+        );
+        let raider = w.spawn_class(
+            ShipClass::Corvette,
+            Team::Player,
+            Vec3::new(120.0, 0.0, 4.0),
+        );
+        // Run until the corvette hits the harvester and SOS wakes the escort.
+        let mut woke = false;
+        for _ in 0..(TICK_HZ * 5) {
+            w.step(TICK_DT);
+            if let Some(ee) = w.entity(escort) {
+                if ee.attack_target == Some(raider) {
+                    woke = true;
+                    break;
+                }
+            }
+        }
+        assert!(woke, "enemy escort should rally to defend the harvester");
+    }
+
+    #[test]
+    fn low_hull_enemy_retreats_to_mothership() {
+        let mut w = World::new(73);
+        let depot = Vec3::new(50.0, 0.0, 0.0);
+        w.spawn_class(ShipClass::Carrier, Team::Enemy, depot);
+        let f = w.spawn_class(ShipClass::Fighter, Team::Enemy, Vec3::new(40.0, 0.0, 0.0));
+        // Damage the fighter below the retreat threshold (30%).
+        let max_hull = w.registry.get(ShipClass::Fighter).max_hull;
+        w.entities.iter_mut().find(|e| e.id == f).unwrap().hull = max_hull * 0.2;
+        w.step(TICK_DT);
+        // The retreat order should point at the enemy carrier.
+        let order = w
+            .entity(f)
+            .and_then(|e| e.order)
+            .expect("retreat order set");
+        assert!(
+            (order - depot).length() < 1e-3,
+            "low-hull fighter should retreat to the mothership: order={order:?}",
+        );
+    }
+
+    #[test]
+    fn enemy_build_caps_at_force_limit() {
+        let mut w = World::new(75);
+        w.spawn_class(ShipClass::Carrier, Team::Enemy, Vec3::ZERO);
+        // Pre-spawn the force cap worth of armed enemies.
+        for i in 0..ENEMY_FORCE_CAP {
+            w.spawn_class(
+                ShipClass::Fighter,
+                Team::Enemy,
+                Vec3::new(0.0, 0.0, 5.0 + i as f32),
+            );
+        }
+        w.enemy_salvage = 10_000.0; // plenty
+        w.step(TICK_DT);
+        assert!(
+            w.enemy_build_queue.is_empty(),
+            "commander should stop building once the force cap is reached",
         );
     }
 
