@@ -17,7 +17,7 @@ use sol_render::{
 use sol_sim::CrewKind;
 #[cfg(target_arch = "wasm32")]
 use sol_sim::Stance;
-use sol_sim::{CombatEvent, Command, EntityId, Patrol, ShipClass, Team, WeaponKind, World};
+use sol_sim::{CombatEvent, Command, EntityId, ShipClass, Team, WeaponKind, World};
 
 /// Group-move arrangement applied by [`App::issue_move`]. Local UI state only
 /// (never enters the sim): it just maps a click to per-ship slot targets.
@@ -1884,8 +1884,16 @@ impl App {
         let pressed = event.state == ElementState::Pressed;
         // One-shot actions fire on the initial press, not on auto-repeat.
         let first = pressed && !event.repeat;
-        // Pause toggles at any time, including over the build overlay.
+        // Space toggles Sensors view; P pauses (fix-it.md items 11 + 12). Both
+        // work over the build overlay too so the player can park and unpark.
         if first && event.logical_key == Key::Named(NamedKey::Space) {
+            self.toggle_sensors();
+            return;
+        }
+        if first
+            && (event.logical_key == Key::Character("p".into())
+                || event.logical_key == Key::Character("P".into()))
+        {
             self.toggle_pause();
             return;
         }
@@ -1941,6 +1949,7 @@ impl App {
                     self.toggle_focus();
                 }
             }
+            // (Sensors is on Space now; the V hotkey is retained as an alias.)
             Key::Character("v") | Key::Character("V") => {
                 if first {
                     self.toggle_sensors();
@@ -2183,65 +2192,42 @@ fn class_scale(class: ShipClass) -> f32 {
 }
 
 fn spawn_demo_fleet(world: &mut World) {
-    // Stationary core: the carrier and a few escorts holding formation.
+    // Player starts thin: the mothership, one resourcer for the economy, and a
+    // wedge of three fighters in formation. Everything else has to be built.
     world.spawn_class(ShipClass::Carrier, Team::Player, Vec3::ZERO);
-    let core = [
-        (ShipClass::FrigateGeneral, Vec3::new(-9.0, 0.0, 7.0)),
-        (ShipClass::Corvette, Vec3::new(9.0, 0.0, 7.0)),
-        (ShipClass::Resourcer, Vec3::new(0.0, 0.0, 11.0)),
-        (ShipClass::Bomber, Vec3::new(0.0, -2.5, -9.0)),
-    ];
-    for (class, pos) in core {
-        world.spawn_class(class, Team::Player, pos);
-    }
-    // A flight of fighters patrolling a circle around the fleet.
-    const PATROL: u32 = 5;
-    for k in 0..PATROL {
-        let angle = (k as f32 / PATROL as f32) * std::f32::consts::TAU;
-        world.spawn_patrol(
-            ShipClass::Fighter,
-            Team::Player,
-            Patrol {
-                center: Vec3::ZERO,
-                radius: 20.0,
-                height: 2.0,
-                angular_speed: 0.35,
-                angle,
-            },
-        );
-    }
-
-    // Enemy mothership across the map with two harvesters nearby; the commander
-    // AI will dispatch them to gather matter and fund new builds.
     world.spawn_class(
-        ShipClass::Carrier,
-        Team::Enemy,
-        Vec3::new(220.0, 0.0, -180.0),
+        ShipClass::Resourcer,
+        Team::Player,
+        Vec3::new(0.0, 0.0, 12.0),
     );
-    for (i, off) in [Vec3::new(-12.0, 0.0, 0.0), Vec3::new(12.0, 0.0, 4.0)]
-        .into_iter()
-        .enumerate()
+    for (i, off) in [
+        Vec3::new(-6.0, 0.0, -8.0),
+        Vec3::new(0.0, 0.0, -10.0),
+        Vec3::new(6.0, 0.0, -8.0),
+    ]
+    .into_iter()
+    .enumerate()
     {
         let _ = i;
-        world.spawn_class(
-            ShipClass::Resourcer,
-            Team::Enemy,
-            Vec3::new(220.0, 0.0, -180.0) + off,
-        );
+        world.spawn_class(ShipClass::Fighter, Team::Player, off);
     }
 
-    // An enemy strike group inbound from one flank. It starts beyond the fleet's
-    // sensors (hidden by fog of war) and advances on the mothership, popping into
-    // view as it crosses a player sensor sphere.
-    let enemy = [
-        (ShipClass::Corvette, Vec3::new(120.0, 0.0, -90.0)),
-        (ShipClass::Fighter, Vec3::new(128.0, 4.0, -84.0)),
-        (ShipClass::Fighter, Vec3::new(128.0, -4.0, -96.0)),
-        (ShipClass::Bomber, Vec3::new(134.0, 0.0, -90.0)),
-        (ShipClass::FrigateGeneral, Vec3::new(140.0, 0.0, -92.0)),
-    ];
-    for (class, pos) in enemy {
-        world.spawn_class(class, Team::Enemy, pos);
+    // Enemy mirrors the player, far across the map so the first contact takes
+    // a real maneuver. No pre-spawned strike group: the wave cycle (5-minute
+    // increments per fix-it.md item 10) builds the attacking force over time.
+    let enemy_home = Vec3::new(420.0, 0.0, -340.0);
+    world.spawn_class(ShipClass::Carrier, Team::Enemy, enemy_home);
+    world.spawn_class(
+        ShipClass::Resourcer,
+        Team::Enemy,
+        enemy_home + Vec3::new(0.0, 0.0, 12.0),
+    );
+    for off in [
+        Vec3::new(-6.0, 0.0, -8.0),
+        Vec3::new(0.0, 0.0, -10.0),
+        Vec3::new(6.0, 0.0, -8.0),
+    ] {
+        world.spawn_class(ShipClass::Fighter, Team::Enemy, enemy_home + off);
     }
 }
 

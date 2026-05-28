@@ -20,41 +20,15 @@ Items that fail get moved back to Pending with a note on what's still wrong.
 
 ## Sim / balance
 
-- [ ] **(1) Starting fleet = 3 fighters each side.** Player and enemy both
-  spawn with only 3 fighters; the rest of the military builds up over time
-  from harvesting.
-- [ ] **(2) Enemy farther away.** Move the enemy strike group and mothership
-  significantly farther from the player.
-- [ ] **(3) Carriers carry light weapons.** Carriers should be able to fight
-  back (small turret or two).
-- [ ] **(4) Auto-harvest at start.** Player resourcers auto-assigned to the
-  nearest live node from spawn, same as the enemy commander already does.
-- [ ] **(5) Slower harvest rate.** Lower the per-second harvest rate.
-- [ ] **(6) Half ship speed.** Global tuning - every ship moves at roughly
-  half its current speed.
-- [ ] **(7) No fighter patrols at spawn.** Fighters spawn in formation at
-  the start, no orbiting circles.
+(items 1-7 implemented; see "Awaiting validation" below)
 
 ## AI
 
-- [ ] **(8) Fighters defend nearby allies.** Any fighter (and other armed
-  ships) should break off to engage an enemy that's attacking a friendly
-  within sensor / SOS range.
-- [ ] **(9) All ships default to Defensive awareness.** Any ship near a
-  fight engages by default; spell out the rule so it's consistent across
-  classes.
-- [ ] **(10) Enemy wave cycle (5-minute increments).**
-  - First wave is gated for 5 minutes; during the build-up phase the
-    commander harvests + grows the force.
-  - When the timer fires, the wave attacks the player.
-  - If the wave loses >=50% of its initial size, the survivors **retreat
-    home** and the cycle restarts (another 5-minute build-up).
-  - Each successive wave sends an **ever-increasing** force.
+(items 8-10 implemented; see "Awaiting validation" below)
 
 ## Controls
 
-- [ ] **(11) Space = Sensors toggle.**
-- [ ] **(12) P = Pause.**
+(items 11-12 implemented; see "Awaiting validation" below)
 
 ## Rendering
 
@@ -73,5 +47,37 @@ Items that fail get moved back to Pending with a note on what's still wrong.
 
 ## Awaiting validation
 
-(items move here once implemented and pushed; user deletes them after
-testing the live build)
+- [ ] **(1) Starting fleet = 3 fighters each side.** Each team spawns with
+  Carrier + 1 Resourcer + 3 Fighters; no extra strike group.
+- [ ] **(2) Enemy farther away.** Enemy mothership moved from `(220, 0, -180)`
+  to `(420, 0, -340)` (~440 units from origin vs ~280).
+- [ ] **(3) Carriers carry light weapons.** Carrier blueprint now has a
+  light Ballistic turret (range 30, dmg 8, cooldown 0.9s). Carrier no longer
+  spawns Passive (Defensive default - fires in range, doesn't pursue).
+- [ ] **(4) Auto-harvest at start.** New `auto_assign_idle_harvesters` runs
+  each step for both teams; any idle Resourcer is assigned the nearest live
+  node automatically. The existing manual Gather command path still works
+  (player Gather orders take precedence).
+- [ ] **(5) Slower harvest rate.** `HARVEST_RATE` lowered from 60.0/s to
+  25.0/s.
+- [ ] **(6) Half ship speed.** Every blueprint's max_speed + accel halved
+  (Fighter 16->8, Bomber 12->6, Corvette 10->5, etc.).
+- [ ] **(7) No fighter patrols at spawn.** Player + enemy each spawn 3
+  Fighters in a wedge formation behind the carrier (no orbiting circle).
+- [ ] **(8) Fighters defend nearby allies.** SOS radius bumped from 35 ->
+  90 so any armed ally within real "nearby" distance breaks off to engage
+  an attacker. Fighters were already eligible; the larger radius makes it
+  reliable.
+- [ ] **(9) All ships default to Defensive awareness.** Together with (8),
+  Defensive ships auto-engage anything in weapon range AND respond to SOS
+  out to 90 units. Carriers join the awareness pool (no longer Passive).
+- [ ] **(10) Enemy wave cycle (5-minute increments).** New
+  `enemy_wave_cooldown` (init 300s) gates wave formation. Each wave records
+  its `initial_size`; when survivors drop to <=50%, the wave **routs**
+  (clears attack_target, orders survivors home to the enemy mothership) and
+  the cooldown resets. Successful kills also reset the cooldown. The mother-
+  ship is excluded from waves (anchors home defense).
+- [ ] **(11) Space = Sensors toggle.** Was Pause; now triggers Sensors view.
+  V still works as an alias.
+- [ ] **(12) P = Pause.** New hotkey. The Pause button on the HUD still
+  works too.

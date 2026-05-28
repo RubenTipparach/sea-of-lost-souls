@@ -31,7 +31,7 @@ const SEPARATION_SPACING: f32 = 1.15;
 const SEPARATION_GAIN: f32 = 3.0;
 
 /// Matter harvested per second while a resourcer sits in a node's gather range.
-const HARVEST_RATE: f32 = 60.0;
+const HARVEST_RATE: f32 = 25.0;
 
 /// Crew complement a carrier (the Ark) contributes to the player's pools. Other
 /// ships draw from these; the carrier itself requires no separate crew.
@@ -223,7 +223,9 @@ fn weapon_for(class: ShipClass) -> Option<Weapon> {
         ShipClass::FrigateGeneral => w(WeaponKind::Ballistic, 38.0, 18.0, 80.0, 0.9, 0.0, 0.6),
         ShipClass::FrigateMissile => w(WeaponKind::Missile, 55.0, 45.0, 38.0, 2.6, 70.0, 0.8),
         ShipClass::CapitalDestroyer => w(WeaponKind::Ballistic, 50.0, 40.0, 70.0, 1.4, 0.0, 0.9),
-        ShipClass::Carrier => None,
+        // Carrier: a pair of light defensive turrets so it isn't helpless if
+        // an enemy slips past the screen (fix-it.md item 3).
+        ShipClass::Carrier => w(WeaponKind::Ballistic, 30.0, 8.0, 70.0, 0.9, 0.0, 0.5),
     }
 }
 
@@ -281,6 +283,12 @@ type Combatant = (EntityId, Team, Vec3, Vec3, f32, bool, f32, bool);
 /// Minimum number of idle armed enemies needed to form a raid wave; reinforce-
 /// ments join an existing wave even below this threshold.
 pub const WAVE_SIZE_MIN: usize = 3;
+/// Seconds the commander spends building / harvesting between waves
+/// (fix-it.md item 10). The first wave is gated by this same cooldown.
+pub const ENEMY_WAVE_COOLDOWN_SECS: f32 = 300.0;
+/// Fraction of the wave's initial size at or below which the wave is
+/// considered routed and survivors retreat to the enemy mothership.
+pub const ENEMY_WAVE_ROUT_FACTOR: f32 = 0.5;
 /// Hull fraction the disabler beam clamps its target to. The target is flagged
 /// Disabled at this floor instead of being killed.
 pub const DISABLER_HULL_FLOOR: f32 = 0.05;
@@ -304,6 +312,9 @@ pub const TOW_SPEED_FACTOR: f32 = 0.5;
 pub struct EnemyWave {
     pub target: EntityId,
     pub formed_tick: u64,
+    /// Member count at the moment the wave formed; the wave routs and
+    /// retreats when the live count drops to `initial_size * ENEMY_WAVE_ROUT_FACTOR`.
+    pub initial_size: u32,
 }
 
 /// A disabled enemy hull that a salvager has successfully towed back to the
@@ -350,28 +361,20 @@ impl ShipRegistry {
         // Speeds are tuned for the current demo scene (tens of units across);
         // radius drives separation and picking; crew/cost/build come from the
         // per-class match below.
+        // Speeds are halved from the original prototype tuning (fix-it.md item
+        // 6) so encounters play out at a more readable pace.
         type Row = (ShipClass, f32, f32, f32, f32, f32, f32, f32);
         let rows: [Row; 9] = [
-            (ShipClass::Fighter, 18.0, 16.0, 24.0, 130.0, 1.0, 80.0, 0.0),
-            (ShipClass::Bomber, 30.0, 12.0, 16.0, 90.0, 1.5, 120.0, 0.0),
-            (
-                ShipClass::Corvette,
-                220.0,
-                10.0,
-                12.0,
-                70.0,
-                2.25,
-                400.0,
-                0.0,
-            ),
-            // Salvager: slightly larger than a corvette, slower, tougher hull,
-            // unarmed. The disabler/tow rig comes with the capture mechanic.
-            (ShipClass::Salvager, 260.0, 9.0, 10.0, 60.0, 2.5, 500.0, 0.0),
+            (ShipClass::Fighter, 18.0, 8.0, 12.0, 130.0, 1.0, 80.0, 0.0),
+            (ShipClass::Bomber, 30.0, 6.0, 8.0, 90.0, 1.5, 120.0, 0.0),
+            (ShipClass::Corvette, 220.0, 5.0, 6.0, 70.0, 2.25, 400.0, 0.0),
+            // Salvager: slightly larger than a corvette, slower, tougher hull.
+            (ShipClass::Salvager, 260.0, 4.5, 5.0, 60.0, 2.5, 500.0, 0.0),
             (
                 ShipClass::Resourcer,
                 140.0,
-                8.0,
-                9.0,
+                4.0,
+                4.5,
                 55.0,
                 2.5,
                 300.0,
@@ -380,8 +383,8 @@ impl ShipRegistry {
             (
                 ShipClass::FrigateGeneral,
                 4000.0,
-                6.0,
-                5.0,
+                3.0,
+                2.5,
                 30.0,
                 4.25,
                 2000.0,
@@ -390,8 +393,8 @@ impl ShipRegistry {
             (
                 ShipClass::FrigateMissile,
                 4200.0,
-                5.5,
-                4.5,
+                2.75,
+                2.25,
                 28.0,
                 4.5,
                 1900.0,
@@ -400,8 +403,8 @@ impl ShipRegistry {
             (
                 ShipClass::CapitalDestroyer,
                 16000.0,
-                4.0,
-                3.0,
+                2.0,
+                1.5,
                 14.0,
                 6.0,
                 8000.0,
@@ -410,8 +413,8 @@ impl ShipRegistry {
             (
                 ShipClass::Carrier,
                 40000.0,
-                3.0,
-                2.0,
+                1.5,
+                1.0,
                 8.0,
                 8.0,
                 20000.0,
@@ -698,6 +701,14 @@ pub struct World {
     pub enemy_build_index: u32,
     /// Active enemy raid wave, if any (commander state).
     pub enemy_wave: Option<EnemyWave>,
+    /// Seconds until the commander forms the next wave. Initialized to one
+    /// full cooldown so the player has a 5-minute build-up before first
+    /// contact (fix-it.md item 10).
+    pub enemy_wave_cooldown: f32,
+    /// Number of waves the commander has launched so far. Just bookkeeping
+    /// for diagnostics; the natural per-cycle build during cooldown grows
+    /// each wave organically.
+    pub enemy_wave_index: u32,
     /// Hulls towed back to the Ark and waiting on a Keep/Liquidate decision.
     /// Survives across encounters until the player resolves each entry.
     pub pending_captures: Vec<CapturedHull>,
@@ -726,6 +737,8 @@ impl World {
             enemy_build_queue: Vec::new(),
             enemy_build_index: 0,
             enemy_wave: None,
+            enemy_wave_cooldown: ENEMY_WAVE_COOLDOWN_SECS,
+            enemy_wave_index: 0,
             pending_captures: Vec::new(),
             registry: ShipRegistry::with_defaults(),
             rng: Rng::new(seed),
@@ -831,14 +844,13 @@ impl World {
             target: None,
             attack_target: None,
             weapon_cooldown: 0.0,
-            // Motherships and harvesters default to Passive so they never go
-            // off to hunt; the commander AI / SOS / explicit orders move them.
-            // Salvagers spawn Defensive: the disabler auto-target filter
-            // (DISABLER_ENGAGE_HULL) keeps them holding fire on full-hull
-            // enemies, so they only engage targets that combat ships have
-            // already softened.
+            // Harvesters default to Passive so they never wander off to fight.
+            // Everyone else (including the carrier, now that it has a light
+            // weapon per fix-it.md item 3) defaults to Defensive: auto-fire
+            // on hostiles in weapon range, no pursuit. Salvagers stay
+            // restrained by the disabler engage filter (DISABLER_ENGAGE_HULL).
             stance: match ship.class {
-                ShipClass::Carrier | ShipClass::Resourcer => Stance::Passive,
+                ShipClass::Resourcer => Stance::Passive,
                 _ => Stance::Defensive,
             },
             anchor: Some(transform.pos),
@@ -1062,18 +1074,23 @@ impl World {
         }
     }
 
-    fn enemy_commander_step(&mut self) {
+    /// Per-step harvester auto-dispatch (fix-it.md item 4): any team's idle
+    /// resourcer is assigned the nearest live resource node. Runs alongside
+    /// the existing player Gather command path: a player ship with a manual
+    /// Gather order keeps it; one without is picked up here. Deterministic
+    /// (iterates entities in stable id order, then nodes).
+    fn auto_assign_idle_harvesters(&mut self) {
         let live_nodes: Vec<(NodeId, Vec3)> = self
             .resource_nodes
             .iter()
             .filter(|n| n.amount > 0.0)
             .map(|n| (n.id, n.pos))
             .collect();
+        if live_nodes.is_empty() {
+            return;
+        }
         for e in &mut self.entities {
-            if e.ship.team != Team::Enemy || e.ship.class != ShipClass::Resourcer {
-                continue;
-            }
-            if e.gather.is_some() {
+            if e.ship.class != ShipClass::Resourcer || e.gather.is_some() {
                 continue;
             }
             let my_pos = e.transform.pos;
@@ -1094,47 +1111,84 @@ impl World {
                 });
             }
         }
-        // Raid wave: keep the current wave alive while its target exists; if the
-        // line is idle (or the target was destroyed) and enough healthy combat
-        // ships are free, form a new wave on the player mothership. Eligible
-        // enemies in the wave are pointed at the target so the pursuit pass
-        // pulls them in as a coordinated group.
+    }
+
+    fn enemy_commander_step(&mut self) {
+        // Wave cycle (fix-it.md item 10): the commander spends a 5-minute
+        // cooldown harvesting + building, fires a wave at the player carrier,
+        // and resets the cooldown either on a successful kill or on a rout
+        // (>=50% losses). Cycle repeats indefinitely; each successive wave is
+        // naturally bigger because the build queue runs through the cooldown.
+        let dt = TICK_DT;
+        if self.enemy_wave_cooldown > 0.0 {
+            self.enemy_wave_cooldown = (self.enemy_wave_cooldown - dt).max(0.0);
+        }
         let player_carrier = self
             .entities
             .iter()
             .find(|e| e.ship.class == ShipClass::Carrier && e.ship.team == Team::Player)
             .map(|e| e.id);
-        let live_wave = self.enemy_wave.and_then(|w| {
-            if self.entities.iter().any(|e| e.id == w.target) {
-                Some(w)
+        let enemy_depot_pos = self
+            .entities
+            .iter()
+            .find(|e| e.ship.class == ShipClass::Carrier && e.ship.team == Team::Enemy)
+            .map(|e| e.transform.pos);
+
+        // 1) Validate the current wave: target gone -> success; too few left -> rout.
+        let mut wave_resolved = false;
+        let mut wave_routed = false;
+        if let Some(wave) = self.enemy_wave {
+            let target_alive = self.entities.iter().any(|e| e.id == wave.target);
+            if !target_alive {
+                wave_resolved = true;
             } else {
-                None
+                let current = self
+                    .entities
+                    .iter()
+                    .filter(|e| e.ship.team == Team::Enemy && e.attack_target == Some(wave.target))
+                    .count() as u32;
+                let rout_threshold =
+                    (wave.initial_size as f32 * ENEMY_WAVE_ROUT_FACTOR).ceil() as u32;
+                if current <= rout_threshold {
+                    wave_routed = true;
+                    wave_resolved = true;
+                }
             }
-        });
-        let target_for_wave = live_wave.map(|w| w.target).or_else(|| {
-            let idle_armed = self
-                .entities
-                .iter()
-                .filter(|e| {
-                    e.ship.team == Team::Enemy
-                        && !e.disabled
-                        && e.attack_target.is_none()
-                        && self.registry.get(e.ship.class).weapon.is_some()
-                })
-                .count();
-            if idle_armed >= WAVE_SIZE_MIN {
-                player_carrier
-            } else {
-                None
+        }
+        if wave_routed {
+            // Survivors run home: clear their attack and steer them to the
+            // enemy mothership. Low-hull retreat below will keep them there.
+            let wave_target = self.enemy_wave.map(|w| w.target);
+            if let (Some(target), Some(depot)) = (wave_target, enemy_depot_pos) {
+                for e in &mut self.entities {
+                    if e.ship.team != Team::Enemy {
+                        continue;
+                    }
+                    if e.attack_target != Some(target) {
+                        continue;
+                    }
+                    e.attack_target = None;
+                    e.order = Some(depot);
+                }
             }
-        });
-        if let Some(target) = target_for_wave {
-            self.enemy_wave = Some(EnemyWave {
-                target,
-                formed_tick: self.tick,
-            });
-            for e in &mut self.entities {
-                if e.ship.team != Team::Enemy || e.attack_target.is_some() || e.disabled {
+        }
+        if wave_resolved {
+            self.enemy_wave = None;
+            self.enemy_wave_cooldown = ENEMY_WAVE_COOLDOWN_SECS;
+            self.enemy_wave_index = self.enemy_wave_index.wrapping_add(1);
+        }
+
+        // 2) Form the next wave once the cooldown elapses and we have enough
+        // healthy combat ships to make it worthwhile. Wave size grows naturally
+        // because the build cycle ran throughout the cooldown.
+        if self.enemy_wave.is_none() && self.enemy_wave_cooldown <= 0.0 {
+            let mut eligible: Vec<EntityId> = Vec::new();
+            for e in &self.entities {
+                if e.ship.team != Team::Enemy
+                    || e.disabled
+                    || e.attack_target.is_some()
+                    || e.towing.is_some()
+                {
                     continue;
                 }
                 let bp = self.registry.get(e.ship.class);
@@ -1144,10 +1198,28 @@ impl World {
                 if e.hull / bp.max_hull.max(1.0) < LOW_HULL_RETREAT {
                     continue;
                 }
-                e.attack_target = Some(target);
+                // Don't pull the enemy mothership into a wave; it needs to
+                // anchor home defense.
+                if e.ship.class == ShipClass::Carrier {
+                    continue;
+                }
+                eligible.push(e.id);
             }
-        } else {
-            self.enemy_wave = None;
+            if eligible.len() >= WAVE_SIZE_MIN {
+                if let Some(target) = player_carrier {
+                    let initial_size = eligible.len() as u32;
+                    for id in &eligible {
+                        if let Some(e) = self.entity_mut(*id) {
+                            e.attack_target = Some(target);
+                        }
+                    }
+                    self.enemy_wave = Some(EnemyWave {
+                        target,
+                        formed_tick: self.tick,
+                        initial_size,
+                    });
+                }
+            }
         }
         // Force cap: stop building once the enemy already fields enough combat
         // ships, so the fight stays winnable.
@@ -1384,6 +1456,7 @@ impl World {
         }
 
         // 2b.1) Enemy commander AI: schedule harvesters and fund builds.
+        self.auto_assign_idle_harvesters();
         self.enemy_commander_step();
 
         // 2c) Stance behavior (player team):
@@ -1394,7 +1467,10 @@ impl World {
         //     steer to a weapon-range standoff of their target.
         //   - Return-to-anchor: Defensive ships with nothing to engage steer
         //     toward `anchor` so they drift back after a fight ends.
-        const SOS_RADIUS: f32 = 35.0;
+        // SOS radius (fix-it.md items 8 + 9): bumped to 90 so any armed ally
+        // within real "nearby" distance breaks off to engage a threat that's
+        // shooting a friend. Every armed class (fighters included) responds.
+        const SOS_RADIUS: f32 = 90.0;
         let positions: Vec<(EntityId, Team, Vec3)> = self
             .entities
             .iter()
@@ -2101,9 +2177,12 @@ impl World {
             h = fnv1a(h, w.target.0);
             h = fnv1a(h, w.formed_tick as u32);
             h = fnv1a(h, (w.formed_tick >> 32) as u32);
+            h = fnv1a(h, w.initial_size);
         } else {
             h = fnv1a(h, 0);
         }
+        h = fnv1a(h, self.enemy_wave_cooldown.to_bits());
+        h = fnv1a(h, self.enemy_wave_index);
         for n in &self.resource_nodes {
             h = fnv1a(h, n.id.0);
             h = fnv1a(h, n.amount.to_bits());
@@ -2809,6 +2888,8 @@ mod tests {
                 )
             })
             .collect();
+        // Skip the 5-minute wave cooldown so the test isn't sleep-driven.
+        w.enemy_wave_cooldown = 0.0;
         w.step(TICK_DT);
         assert!(w.enemy_wave.is_some(), "wave should form on first step");
         assert_eq!(w.enemy_wave.unwrap().target, carrier);
@@ -2824,16 +2905,18 @@ mod tests {
     #[test]
     fn enemy_switches_off_non_combat_when_combat_ship_attacks() {
         let mut w = World::new(83);
-        // Player carrier (soft target) + a player corvette (combat).
-        let carrier = w.spawn_class(ShipClass::Carrier, Team::Player, Vec3::ZERO);
+        // Player resourcer (unarmed soft target) + a player corvette (combat).
+        // Carriers carry a light weapon now (fix-it.md item 3) so they don't
+        // qualify as "non-combat" for the target-switching test.
+        let res = w.spawn_class(ShipClass::Resourcer, Team::Player, Vec3::ZERO);
         let corv = w.spawn_class(ShipClass::Corvette, Team::Player, Vec3::new(8.0, 0.0, 0.0));
-        // Enemy corvette already locked on the player carrier (e.g. by a wave).
+        // Enemy corvette already locked on the resourcer (e.g. by a wave).
         let enemy = w.spawn_class(ShipClass::Corvette, Team::Enemy, Vec3::new(15.0, 0.0, 0.0));
         w.entities
             .iter_mut()
             .find(|e| e.id == enemy)
             .unwrap()
-            .attack_target = Some(carrier);
+            .attack_target = Some(res);
         // Step until the player corvette hits the enemy and it pivots.
         let mut switched = false;
         for _ in 0..(TICK_HZ * 5) {
@@ -2847,7 +2930,7 @@ mod tests {
         }
         assert!(
             switched,
-            "enemy should disengage from carrier to fight the corvette"
+            "enemy should disengage from resourcer to fight the corvette"
         );
     }
 
