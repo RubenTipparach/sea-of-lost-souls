@@ -66,6 +66,7 @@ fn compile_one(dir: &Path, ship_json: &Path, out_dir: &Path) -> anyhow::Result<(
 
     validate_glb_nodes(&def, &glb_nodes)?;
     validate_power_graph(&def)?;
+    validate_gameplay_stats(&def)?;
 
     // Emit compiled artifact: bincode of the validated ShipDef.
     let ship_out = out_dir.join(format!("{}.ship", def.id));
@@ -123,12 +124,45 @@ fn validate_glb_nodes(def: &ShipDef, glb_nodes: &HashSet<String>) -> anyhow::Res
     Ok(())
 }
 
+/// Validate the gameplay stats added in schema v2: a strictly positive
+/// movement envelope, a finite non-negative build cost, and well-formed
+/// optional cargo/production blocks.
+fn validate_gameplay_stats(def: &ShipDef) -> anyhow::Result<()> {
+    let m = &def.mobility;
+    for (field, v) in [
+        ("mobility.maxSpeed", m.max_speed),
+        ("mobility.accel", m.accel),
+        ("mobility.turnRateDeg", m.turn_rate_deg),
+    ] {
+        if !v.is_finite() || v <= 0.0 {
+            bail!("{field} must be finite and > 0 (got {v})");
+        }
+    }
+    let b = &def.build;
+    for (field, v) in [("build.matter", b.matter), ("build.time", b.time)] {
+        if !v.is_finite() || v < 0.0 {
+            bail!("{field} must be finite and >= 0 (got {v})");
+        }
+    }
+    if let Some(c) = &def.cargo {
+        if !c.capacity.is_finite() || c.capacity <= 0.0 {
+            bail!("cargo.capacity must be finite and > 0 (got {})", c.capacity);
+        }
+    }
+    if let Some(p) = &def.production {
+        if p.bays == 0 {
+            bail!("production.bays must be >= 1");
+        }
+    }
+    Ok(())
+}
+
 /// Validate the power-graph connectivity LOGICALLY: the reactor id and every
 /// subsystem id must be reachable through conduits via the virtual `bus_main`.
 ///
 /// Conduits are undirected for connectivity purposes (power can be traced
 /// either way through the bus). Node ids in this graph are logical power ids
-/// (reactor node id, subsystem ids, `bus_main`) — NOT GLB nodes.
+/// (reactor node id, subsystem ids, `bus_main`) - NOT GLB nodes.
 fn validate_power_graph(def: &ShipDef) -> anyhow::Result<()> {
     let grid = &def.power_grid;
 

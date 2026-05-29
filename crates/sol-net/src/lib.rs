@@ -1,4 +1,4 @@
-//! `sol-net` — peer-to-peer networking for Sea of Lost Souls.
+//! `sol-net` - peer-to-peer networking for Sea of Lost Souls.
 //!
 //! STUB. This crate will host the deterministic **lockstep** netcode (the
 //! Age-of-Empires model) over WebRTC data channels via `matchbox`:

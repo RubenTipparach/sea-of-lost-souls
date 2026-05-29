@@ -1,4 +1,4 @@
-//! `sol-shipc` — the static-asset compiler CLI for Sea of Lost Souls.
+//! `sol-shipc` - the static-asset compiler CLI for Sea of Lost Souls.
 //!
 //! Subcommands:
 //!   gen-test-ship                       Procedurally author the test
@@ -35,6 +35,7 @@ fn run() -> anyhow::Result<()> {
 
     match cmd.as_str() {
         "gen-test-ship" => gen::run(),
+        "gen-ships" => gen::run_ships(),
         "build" => {
             let rest: Vec<String> = args.collect();
             let (ships_dir, out_dir) = parse_build_args(&rest)?;
@@ -81,12 +82,13 @@ fn parse_build_args(args: &[String]) -> anyhow::Result<(PathBuf, PathBuf)> {
 }
 
 const USAGE: &str = "\
-sol-shipc — Sea of Lost Souls asset compiler
+sol-shipc - Sea of Lost Souls asset compiler
 
 USAGE:
     sol-shipc gen-test-ship
+    sol-shipc gen-ships
     sol-shipc build <ships_dir> --out <out_dir>
 
 EXAMPLES:
-    sol-shipc gen-test-ship
+    sol-shipc gen-ships
     sol-shipc build assets/ships --out assets/compiled";

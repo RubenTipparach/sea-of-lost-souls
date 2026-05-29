@@ -1,5 +1,5 @@
 // Authoring schema shared with the Rust pipeline (sol-shipc / sol-assets).
-// This MUST stay in sync with assets/ships/<id>/ship.json — it is the contract
+// This MUST stay in sync with assets/ships/<id>/ship.json - it is the contract
 // between the editor (writer) and the deterministic engine (reader).
 // See design.md §15 & §16.
 
@@ -9,6 +9,25 @@ export type ColliderKind = 'convexHull' | 'box' | 'sphere' | 'capsule';
 export interface Crew {
   min: number;
   optimal: number;
+}
+
+export interface Mobility {
+  maxSpeed: number;
+  accel: number;
+  turnRateDeg: number;
+}
+
+export interface Build {
+  salvage: number;
+  time: number;
+}
+
+export interface Cargo {
+  capacity: number;
+}
+
+export interface Production {
+  bays: number;
 }
 
 export interface Hull {
@@ -74,6 +93,10 @@ export interface ShipDef {
   class: string;
   model: string;
   mass: number;
+  mobility: Mobility;
+  build: Build;
+  cargo?: Cargo;
+  production?: Production;
   crew: Crew;
   hull: Hull;
   colliders: Collider[];
@@ -82,17 +105,19 @@ export interface ShipDef {
   hardpoints: Hardpoint[];
 }
 
-// Canonical default — matches assets/ships/test_interceptor/ship.json so that
+// Canonical default - matches assets/ships/test_interceptor/ship.json so that
 // Export produces a valid, pipeline-ready file immediately.
 export function defaultShipDef(): ShipDef {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: 'test_interceptor',
     name: 'Test Interceptor',
     faction: 'player',
     class: 'strike',
     model: 'model.glb',
     mass: 60,
+    mobility: { maxSpeed: 140, accel: 80, turnRateDeg: 120 },
+    build: { salvage: 30, time: 12 },
     crew: { min: 1, optimal: 1 },
     hull: { sections: ['fore', 'aft'], integrity: 80 },
     colliders: [{ type: 'convexHull', node: 'hull' }],

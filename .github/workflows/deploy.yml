@@ -1,23 +1,31 @@
 name: build-and-deploy
 
-# Continuous delivery, no gates: every commit on every branch builds the wasm
-# game + the web ship editor and deploys them to GitHub Pages. The default
-# branch publishes to the site root; every other branch publishes to a
-# branch/<slug>/ preview. See design.md §17.
+# Build the wasm game + the web ship editor and deploy to GitHub Pages on every
+# push to any branch (no main-branch gate), using the official GitHub Actions
+# Pages flow. One run per push: one build job, then one deploy job. A single
+# shared Pages deployment; the latest push wins. See design.md §17.
 on:
   push:
     branches: ["**"]
+  workflow_dispatch:
 
 permissions:
-  contents: write          # to publish to the gh-pages branch
+  contents: read
+  pages: write
+  id-token: write
 
-# Serialize deploys so parallel branch builds don't race on gh-pages.
+# Concurrency is not about the steps inside one run (that is always build then
+# deploy); it guards OVERLAPPING runs. If you push twice in quick succession the
+# newer push cancels the older in-flight run for the same ref, so the live site
+# tracks the latest commit and two deploys never race the single github-pages
+# environment.
 concurrency:
-  group: pages-deploy
-  cancel-in-progress: false
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build-deploy:
+  build:
+    name: build (wasm game + editor)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -59,29 +67,22 @@ jobs:
       # 4) Assemble the site: game at root, editor under /editor.
       - name: Assemble site
         run: |
-          mkdir -p site_build
-          cp -r crates/sol-app/dist/. site_build/
           mkdir -p site_build/editor
+          cp -r crates/sol-app/dist/. site_build/
           cp -r editor/dist/. site_build/editor/
-          # If/when wasm threads are enabled, drop coi-serviceworker.js here and
-          # reference it from index.html so SharedArrayBuffer works on Pages
-          # (GitHub Pages cannot set COOP/COEP headers). See design.md §17.
 
-      # 5) Default branch -> site root; other branches -> branch/<slug> preview.
-      - name: Compute publish directory
-        id: dest
-        run: |
-          if [ "${GITHUB_REF_NAME}" = "${{ github.event.repository.default_branch }}" ]; then
-            echo "dir=." >> "$GITHUB_OUTPUT"
-          else
-            slug="$(echo "${GITHUB_REF_NAME}" | tr '/_' '--')"
-            echo "dir=branch/${slug}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v4
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./site_build
-          destination_dir: ${{ steps.dest.outputs.dir }}
-          keep_files: true       # preserve other branches' previews
+          path: site_build
+
+  deploy:
+    name: deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -19,7 +19,7 @@ repository = "https://github.com/santipab/sea-of-lost-souls"
 # Shared dependency versions live here so the whole workspace stays consistent.
 # (Populated/curated below; individual crates reference these with
 # `dep.workspace = true`.) The graphics stack version is dictated by what
-# compiles together as a unit — see crates/sol-render and crates/sol-app.
+# compiles together as a unit - see crates/sol-render and crates/sol-app.
 [workspace.dependencies]
 # Math + POD helpers (shared everywhere).
 glam = { version = "0.33", features = ["bytemuck"] }
@@ -41,7 +41,7 @@ gltf = "1"
 gltf-json = { version = "1", features = ["names", "extras"] }
 
 # Graphics + windowing stack. CRITICAL: these versions are mutually
-# consistent — egui-wgpu 0.34 depends on `wgpu ^29` and `winit ^0.30`, so the
+# consistent - egui-wgpu 0.34 depends on `wgpu ^29` and `winit ^0.30`, so the
 # whole stack is pinned around wgpu 29 (egui dictates, per the build brief).
 wgpu = "29"
 winit = "0.30"
@@ -51,6 +51,9 @@ egui-winit = { version = "0.34", default-features = false }
 pollster = "0.4"
 raw-window-handle = "0.6"
 
+# Cross-platform monotonic clock: std::time on native, performance.now on wasm.
+web-time = "1"
+
 log = "0.4"
 env_logger = "0.11"
 
@@ -58,6 +61,7 @@ env_logger = "0.11"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 web-sys = "0.3"
+js-sys = "0.3"
 console_error_panic_hook = "0.1"
 console_log = "1"
 

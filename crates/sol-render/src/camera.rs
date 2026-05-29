@@ -29,7 +29,9 @@ impl Default for OrbitCamera {
             distance: 8.0,
             fov_y: 60f32.to_radians(),
             z_near: 0.05,
-            z_far: 1000.0,
+            // Far plane doubled (fix-it.md item 15) so the nebula + stars never
+            // visibly clip as the camera flies around.
+            z_far: 2000.0,
         }
     }
 }

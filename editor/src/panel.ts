@@ -51,7 +51,7 @@ export class Panel {
   render(): void {
     this.host.replaceChildren(
       el('h1', {}, ['Sea of Lost Souls']),
-      el('p', { class: 'subtitle' }, ['Ship Editor — authors model.glb + ship.json']),
+      el('p', { class: 'subtitle' }, ['Ship Editor - authors model.glb + ship.json']),
       this.identitySection(),
       this.crewHullSection(),
       this.shieldsSection(),

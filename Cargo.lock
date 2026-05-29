@@ -1959,14 +1959,17 @@ dependencies = [
  "console_log",
  "env_logger",
  "glam",
+ "js-sys",
  "log",
  "pollster",
  "sol-assets",
+ "sol-procgen",
  "sol-render",
  "sol-sim",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "web-time",
  "winit",
 ]
 
@@ -1986,6 +1989,9 @@ version = "0.1.0"
 [[package]]
 name = "sol-procgen"
 version = "0.1.0"
+dependencies = [
+ "glam",
+]
 
 [[package]]
 name = "sol-render"
@@ -2011,6 +2017,7 @@ dependencies = [
  "glam",
  "gltf",
  "gltf-json",
+ "png",
  "serde",
  "serde_json",
  "sol-assets",
