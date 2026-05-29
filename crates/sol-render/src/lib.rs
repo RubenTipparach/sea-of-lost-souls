@@ -362,6 +362,9 @@ pub struct Renderer {
     /// Full-screen dim quad for sensors-manager view, drawn over the 3D scene
     /// but under the gizmo lines so sensor rings stay bright. Empty = no dim.
     scene_dim: DynamicBuffer,
+    /// Full-screen vertical gradient quad drawn *behind* the scene for the build
+    /// overlay's preview backdrop (fix-it.md item 17). Empty = no backdrop.
+    build_backdrop: DynamicBuffer,
     /// Inverted translucent "sensor field" spheres (sensors-manager view). The
     /// unit sphere mesh is instanced per ship; depth write merges overlaps.
     sphere_pipeline: wgpu::RenderPipeline,
@@ -778,6 +781,7 @@ impl Renderer {
         let overlay_tris = DynamicBuffer::new(&device, "overlay tris", 4096);
         let overlay_lines = DynamicBuffer::new(&device, "overlay lines", 1024);
         let scene_dim = DynamicBuffer::new(&device, "scene dim", 256);
+        let build_backdrop = DynamicBuffer::new(&device, "build backdrop", 256);
         let sensor_spheres = DynamicBuffer::new(&device, "sensor spheres", 256);
 
         let instance_capacity = 256;
@@ -813,6 +817,7 @@ impl Renderer {
             overlay_tris,
             overlay_lines,
             scene_dim,
+            build_backdrop,
             sphere_pipeline,
             sphere_vbuf,
             sphere_ibuf,
@@ -977,10 +982,33 @@ impl Renderer {
     }
 
     /// Show or hide the nebula + backdrop stars (fix-it.md item 17). Used by
-    /// the build overlay to render the previewed ship against a clean black
-    /// backdrop. The grid keeps rendering either way.
+    /// the build overlay to render the previewed ship against a clean
+    /// gradient backdrop. The grid keeps rendering either way.
     pub fn set_background_visible(&mut self, visible: bool) {
         self.background_visible = visible;
+    }
+
+    /// Set (or clear) the build-overlay backdrop: a full-screen vertical
+    /// gradient drawn behind the scene (fix-it.md item 17). `Some((top, bottom))`
+    /// are linear-RGB colors for the top and bottom of the screen; `None`
+    /// clears it. Pair with `set_background_visible(false)` so only the
+    /// gradient (not the nebula) shows behind the previewed ship.
+    pub fn set_build_backdrop(&mut self, colors: Option<([f32; 3], [f32; 3])>) {
+        match colors {
+            None => self.build_backdrop.count = 0,
+            Some((top, bot)) => {
+                let t = [top[0], top[1], top[2], 1.0];
+                let b = [bot[0], bot[1], bot[2], 1.0];
+                // Two triangles covering NDC; +y is the top of the screen.
+                let tl = OverlayVertex::new([-1.0, 1.0], t);
+                let tr = OverlayVertex::new([1.0, 1.0], t);
+                let bl = OverlayVertex::new([-1.0, -1.0], b);
+                let br = OverlayVertex::new([1.0, -1.0], b);
+                let quad = [tl, tr, br, tl, br, bl];
+                self.build_backdrop
+                    .upload(&self.device, &self.queue, "build backdrop", &quad);
+            }
+        }
     }
 
     /// Re-upload only the grid points (fix-it.md item 13: the grid follows the
@@ -1149,6 +1177,15 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+
+            // Build-overlay backdrop: a full-screen gradient drawn before
+            // everything else (no depth write) so the previewed ship sits on a
+            // clean horizon gradient instead of the nebula (fix-it.md item 17).
+            if self.build_backdrop.count > 0 {
+                pass.set_pipeline(&self.overlay_tri_pipeline);
+                pass.set_vertex_buffer(0, self.build_backdrop.buffer.slice(..));
+                pass.draw(0..self.build_backdrop.count, 0..1);
+            }
 
             // Background first: nebula + stars (no depth write) then the ground
             // grid (depth-tested), so ships render over them correctly.

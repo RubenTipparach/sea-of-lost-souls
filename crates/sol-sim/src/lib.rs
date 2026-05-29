@@ -1650,7 +1650,11 @@ impl World {
                     desired = to / dist * speed;
 
                     // Separation: only moving ships push out of overlap, so the
-                    // stationary fleet never drifts.
+                    // stationary fleet never drifts. The push is size-weighted
+                    // (fix-it.md item 21): a ship yields more to a *larger*
+                    // neighbor and barely to a smaller one, so a carrier shoves
+                    // fighters aside instead of getting stuck behind them.
+                    // Equal-size neighbors give weight 1.0 (unchanged spacing).
                     let mut push = Vec3::ZERO;
                     for &(id, pos, r) in &snapshot {
                         if id == e.id {
@@ -1660,7 +1664,8 @@ impl World {
                         let d = off.length();
                         let min_d = (bp.radius + r) * SEPARATION_SPACING;
                         if d > 1e-4 && d < min_d {
-                            push += off / d * (min_d - d);
+                            let weight = 2.0 * r / (bp.radius + r);
+                            push += off / d * (min_d - d) * weight;
                         }
                     }
                     desired += push * SEPARATION_GAIN;

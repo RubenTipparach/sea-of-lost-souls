@@ -71,6 +71,9 @@ const PITCH_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.05;
 /// a top-down view so the whole engagement reads at once.
 const SENSORS_VIEW_DISTANCE: f32 = 300.0;
 const SENSORS_VIEW_PITCH: f32 = 1.15;
+/// Camera-smoothing time constant (seconds). Smaller = snappier; ~0.12 reaches
+/// 99% of a transition in roughly half a second (fix-it.md item 23).
+const CAM_SMOOTH_TAU: f32 = 0.12;
 /// Sensor-field sphere fill (RGBA). A low alpha keeps it a slight, solid-reading
 /// translucent volume; depth write means overlaps do not stack.
 const SENSOR_FIELD_COLOR: [f32; 4] = [0.28, 0.58, 1.0, 0.16];
@@ -270,6 +273,13 @@ struct App {
     graphics: Option<Graphics>,
     camera: OrbitCamera,
     controller: CameraController,
+    /// Smoothing targets for the camera (fix-it.md item 23). Discrete moves
+    /// (Sensors zoom, focus lock-on) set these and `ease_camera` glides the
+    /// real camera toward them; continuous input (orbit / wheel / pan) writes
+    /// the camera directly and resyncs these so easing stays a no-op.
+    cam_target_distance: f32,
+    cam_target_pitch: f32,
+    cam_target_focus: Vec3,
     /// Deterministic simulation; stepped at a fixed rate, rendered interpolated.
     world: World,
     /// Wall-clock of the previous frame. App-side only; the sim never sees it.
@@ -355,6 +365,9 @@ impl App {
             graphics: None,
             camera: OrbitCamera::default(),
             controller: CameraController::default(),
+            cam_target_distance: OrbitCamera::default().distance,
+            cam_target_pitch: OrbitCamera::default().pitch,
+            cam_target_focus: Vec3::ZERO,
             world,
             last_frame: None,
             accumulator: 0.0,
@@ -414,6 +427,7 @@ impl App {
 
         self.camera.focus = Vec3::ZERO;
         self.camera.distance = 30.0;
+        self.sync_cam_targets();
         self.graphics = Some(Graphics {
             renderer,
             meshes,
@@ -428,6 +442,7 @@ impl App {
     fn init_graphics(&mut self, window: Arc<Window>) {
         self.camera.focus = Vec3::ZERO;
         self.camera.distance = 30.0;
+        self.sync_cam_targets();
         self.window = Some(Arc::clone(&window));
 
         let slot: PendingGraphics = std::rc::Rc::new(std::cell::RefCell::new(None));
@@ -604,6 +619,11 @@ impl App {
             // Clear any sensors-mode overlays so they can't bleed onto the preview.
             gfx.renderer.set_scene_dim([0.0, 0.0, 0.0, 0.0]);
             gfx.renderer.set_sensor_spheres(&[]);
+            // Preview backdrop: hide the nebula/stars and paint a blue light->dark
+            // horizon gradient behind the ship (fix-it.md item 17).
+            gfx.renderer.set_background_visible(false);
+            gfx.renderer
+                .set_build_backdrop(Some(([0.18, 0.34, 0.55], [0.02, 0.05, 0.12])));
             let groups: Vec<(&GpuMesh, &[MeshInstance])> = gfx
                 .meshes
                 .get(&class)
@@ -617,13 +637,15 @@ impl App {
             return;
         }
 
-        // Camera lock-on: while a target is set, the focus follows the ship's
-        // interpolated position (orbit/zoom still work). A pan clears the lock in
-        // `apply_camera_pan`; a destroyed target clears it here.
+        // Camera lock-on: while a target is set, the focus *target* tracks the
+        // ship's interpolated position; `ease_camera` (below) glides the real
+        // focus toward it, so engaging a lock eases in instead of snapping
+        // (fix-it.md item 23). A pan clears the lock in `apply_camera_pan`; a
+        // destroyed target clears it here.
         if let Some(tid) = self.focus_target {
             match self.world.entity(tid) {
                 Some(e) => {
-                    self.camera.focus = e.prev_transform.pos.lerp(e.transform.pos, alpha);
+                    self.cam_target_focus = e.prev_transform.pos.lerp(e.transform.pos, alpha);
                 }
                 None => {
                     self.focus_target = None;
@@ -632,6 +654,8 @@ impl App {
                 }
             }
         }
+        // Glide the camera toward its smoothing targets each frame.
+        self.ease_camera(frame_dt);
 
         // Window drawable size, for projecting world points to the HUD overlay.
         let (vw, vh) = match &self.window {
@@ -1035,6 +1059,15 @@ impl App {
                 let size = (n.radius * 0.9).max(1.2);
                 push_blip(&mut gizmo_lines, n.pos, size, [1.0, 0.55, 0.1]);
             }
+            // Enemy mothership marker (fix-it.md item 22): a persistent bright-red
+            // strategic blip on every enemy carrier, shown even when no scout is
+            // in sensor range, so the player always knows where the base is.
+            for e in &self.world.entities {
+                if e.ship.team == Team::Enemy && e.ship.class == ShipClass::Carrier {
+                    let pos = e.prev_transform.pos.lerp(e.transform.pos, alpha);
+                    push_blip(&mut gizmo_lines, pos, 5.0, [1.0, 0.2, 0.2]);
+                }
+            }
         }
 
         // Resource + crew + build HUD readouts (web).
@@ -1082,9 +1115,10 @@ impl App {
         // Tactical grid follows the camera pivot (fix-it.md item 13). Cheap to
         // rebuild + re-upload (~625 vertices).
         gfx.renderer.set_grid(&build_grid(self.camera.focus));
-        // Build overlay backdrop: hide nebula + stars so the previewed ship
-        // sits on a clean black field (fix-it.md item 17).
-        gfx.renderer.set_background_visible(!self.build_open);
+        // Normal scene: full background, no build backdrop (the build-preview
+        // branch above owns the gradient backdrop, fix-it.md item 17).
+        gfx.renderer.set_background_visible(true);
+        gfx.renderer.set_build_backdrop(None);
         match gfx.renderer.render_groups(&self.camera, &render_groups) {
             RenderOutcome::NeedsReconfigure => {
                 if let Some(window) = &self.window {
@@ -1509,6 +1543,8 @@ impl App {
         self.camera.focus.x = self.camera.focus.x.clamp(-400.0, 400.0);
         self.camera.focus.y = self.camera.focus.y.clamp(-120.0, 120.0);
         self.camera.focus.z = self.camera.focus.z.clamp(-400.0, 400.0);
+        // Pan is a direct move: resync the focus target so easing stays instant.
+        self.cam_target_focus = self.camera.focus;
     }
 
     /// XZ centroid of the current selection (the move-direction anchor).
@@ -1808,19 +1844,40 @@ impl App {
 
     /// Toggle the sensors-manager view (dimmed scene + tactical grid + sensor
     /// spheres) and pull the camera out to a battlefield overview, restoring the
-    /// prior framing on exit. Local UI only.
+    /// prior framing on exit. Local UI only. The distance/pitch change sets the
+    /// smoothing targets (fix-it.md item 23) so the zoom glides instead of
+    /// snapping; `ease_camera` does the per-frame interpolation.
     fn toggle_sensors(&mut self) {
         self.sensors_open = !self.sensors_open;
         if self.sensors_open {
-            self.sensors_saved_view = Some((self.camera.distance, self.camera.pitch));
-            self.camera.distance = SENSORS_VIEW_DISTANCE;
-            self.camera.pitch = SENSORS_VIEW_PITCH;
+            self.sensors_saved_view = Some((self.cam_target_distance, self.cam_target_pitch));
+            self.cam_target_distance = SENSORS_VIEW_DISTANCE;
+            self.cam_target_pitch = SENSORS_VIEW_PITCH;
         } else if let Some((distance, pitch)) = self.sensors_saved_view.take() {
-            self.camera.distance = distance;
-            self.camera.pitch = pitch;
+            self.cam_target_distance = distance;
+            self.cam_target_pitch = pitch;
         }
         #[cfg(target_arch = "wasm32")]
         set_sensors_ui(self.sensors_open);
+    }
+
+    /// Snap the smoothing targets to the camera's current framing. Called after
+    /// any direct camera input (orbit / wheel / pinch / pan) so `ease_camera`
+    /// has nothing to do and those inputs feel instant (fix-it.md item 23).
+    fn sync_cam_targets(&mut self) {
+        self.cam_target_distance = self.camera.distance;
+        self.cam_target_pitch = self.camera.pitch;
+        self.cam_target_focus = self.camera.focus;
+    }
+
+    /// Per-frame camera easing toward the smoothing targets. Exponential
+    /// smoothing with time constant `CAM_SMOOTH_TAU`, so the Sensors zoom and
+    /// focus lock-on glide; yaw is never eased (orbit stays crisp).
+    fn ease_camera(&mut self, dt: f32) {
+        let k = 1.0 - (-dt / CAM_SMOOTH_TAU).exp();
+        self.camera.distance += (self.cam_target_distance - self.camera.distance) * k;
+        self.camera.pitch += (self.cam_target_pitch - self.camera.pitch) * k;
+        self.camera.focus += (self.cam_target_focus - self.camera.focus) * k;
     }
 
     /// Stance dropdown state for the current selection: `(value, disabled)`.
@@ -2130,9 +2187,12 @@ impl ApplicationHandler for App {
                 }
                 self.controller
                     .on_cursor_moved(&mut self.camera, position.x, position.y);
+                // Orbit is a direct move: keep easing targets in sync (item 23).
+                self.sync_cam_targets();
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 self.controller.on_scroll(&mut self.camera, delta);
+                self.sync_cam_targets();
             }
             WindowEvent::Touch(t) => {
                 let (tx, ty) = (t.location.x, t.location.y);
@@ -2159,6 +2219,8 @@ impl ApplicationHandler for App {
                     }
                     self.controller
                         .on_touch(&mut self.camera, t.phase, t.id, tx, ty);
+                    // Pinch-zoom / drag-orbit are direct moves (item 23).
+                    self.sync_cam_targets();
                 }
             }
             WindowEvent::ModifiersChanged(mods) => {
