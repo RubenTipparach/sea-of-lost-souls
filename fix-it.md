@@ -20,15 +20,7 @@ Items that fail get moved back to Pending with a note on what's still wrong.
 
 ## Pending
 
-- [ ] **(24) Parallel build system by ship-class lane + per-ship queue UI.**
-  - Four **parallel** build lanes that progress concurrently:
-    **small** (Fighter, Bomber), **medium** (Harvester, Corvette, Salvager),
-    **large** (Frigate general/missile), **capital** (Capital destroyer).
-  - The left build menu is the **list of ships, segregated into those four
-    class sections**. Clicking a ship type queues a build of it.
-  - The **quantity (build xN) control and the build-time slider live on the
-    queued ship entry** in the left menu, not on the global build button.
-  - A build button may remain, but the queuing visual lives in the left list.
+(none)
 
 ## Awaiting validation
 
@@ -53,3 +45,11 @@ Items that fail get moved back to Pending with a note on what's still wrong.
   focus}` + `ease_camera` (exp smoothing, tau 0.12s). Sensors zoom and focus
   lock-on set the targets and glide; orbit / wheel / pinch / pan write the
   camera directly and resync the targets so they stay instant.
+- [ ] **(24) Parallel build system by ship-class lane + per-ship queue UI.**
+  Sim: `World.build_queue` replaced by `build_lanes: [Vec<BuildItem>; 4]`
+  (Small / Medium / Large / Capital via `ShipClass::build_lane`); all four
+  lanes advance + complete concurrently each step; crew reservation + checksum
+  sum across lanes. UI: the build overlay sidebar is now four labeled sections;
+  **clicking a ship row queues one** of that class (and previews it); each row
+  shows its own progress-fill "slider" + yellow **xN** queued badge. The bottom
+  Build button still queues the previewed class. Enemy keeps its serial queue.

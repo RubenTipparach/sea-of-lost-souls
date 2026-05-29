@@ -1076,18 +1076,19 @@ impl App {
             set_resources(self.world.matter, carrying_total);
             set_pending_captures(self.world.pending_captures.len());
             set_crew(&self.world);
-            let status = match self.world.build_queue.first() {
-                Some(b) => {
-                    let bt = self.world.registry.get(b.class).build_time.max(0.001);
-                    let pct = (b.progress / bt * 100.0).clamp(0.0, 100.0) as i32;
-                    format!(
-                        "Building {} {}%  (queue {})",
-                        class_label(b.class),
-                        pct,
-                        self.world.build_queue.len()
-                    )
-                }
-                None => String::new(),
+            // Parallel build lanes (fix-it.md item 24): show how many lanes are
+            // actively building and the total queued across all of them.
+            let active = self
+                .world
+                .build_lanes
+                .iter()
+                .filter(|l| !l.is_empty())
+                .count();
+            let total = self.world.build_queued_total();
+            let status = if total > 0 {
+                format!("Building {active} lane(s)  (queue {total})")
+            } else {
+                String::new()
             };
             set_build_status(&status);
             let (sv, sd) = self.selected_stance_ui();
@@ -2101,7 +2102,12 @@ impl App {
                     self.build_open = false;
                     show_build_overlay(false);
                 }
-                UiCmd::PreviewBuild(class) => self.build_preview = class,
+                // Clicking a ship row both previews it and queues one build
+                // into its lane (fix-it.md item 24).
+                UiCmd::QueueBuild(class) => {
+                    self.build_preview = class;
+                    self.world.enqueue(Command::Build { class });
+                }
                 UiCmd::BuildSelected => self.world.enqueue(Command::Build {
                     class: self.build_preview,
                 }),
@@ -2730,8 +2736,8 @@ enum UiCmd {
     /// Open / close the full-screen build overlay.
     OpenBuild,
     CloseBuild,
-    /// Select a class to preview in the build overlay.
-    PreviewBuild(ShipClass),
+    /// Queue one build of a class (and preview it) from its build-menu row.
+    QueueBuild(ShipClass),
     /// Queue the currently previewed class for construction (if affordable).
     BuildSelected,
     /// Toggle the single-player sim pause.
@@ -2805,10 +2811,11 @@ fn wire_dom_controls() {
             cb.forget();
         }
     }
-    // Build-overlay class cards: clicking one previews that class.
+    // Build-overlay ship rows: clicking one queues a build of that class (and
+    // previews it). Parallel lanes mean clicks across classes build at once.
     for (id, class) in BUILD_BUTTONS {
         if let Some(el) = doc.get_element_by_id(id) {
-            let cb = Closure::<dyn FnMut()>::new(move || push_ui(UiCmd::PreviewBuild(class)));
+            let cb = Closure::<dyn FnMut()>::new(move || push_ui(UiCmd::QueueBuild(class)));
             let _ = el.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref());
             cb.forget();
         }
@@ -2950,10 +2957,35 @@ fn update_build_overlay(world: &World, preview: ShipClass) {
         return;
     };
     for (id, class) in BUILD_BUTTONS {
-        if let Some(el) = doc.get_element_by_id(id) {
-            let cl = el.class_list();
-            let _ = cl.toggle_with_force("sel", class == preview);
-            let _ = cl.toggle_with_force("poor", !world.can_build(class));
+        let Some(el) = doc.get_element_by_id(id) else {
+            continue;
+        };
+        let cl = el.class_list();
+        let _ = cl.toggle_with_force("sel", class == preview);
+        let _ = cl.toggle_with_force("poor", !world.can_build(class));
+
+        // Per-row queue state (fix-it.md item 24): the "time slider" fill shows
+        // this lane's current build progress when this class is its front item;
+        // the xN badge counts how many of THIS class are queued in the lane.
+        let lane = &world.build_lanes[class.build_lane().index()];
+        let count = lane.iter().filter(|b| b.class == class).count();
+        let frac = match lane.first() {
+            Some(b) if b.class == class => {
+                let bt = world.registry.get(b.class).build_time.max(0.001);
+                (b.progress / bt).clamp(0.0, 1.0)
+            }
+            _ => 0.0,
+        };
+        if let Ok(Some(fill)) = el.query_selector(".bo-row-fill") {
+            let _ = fill.set_attribute("style", &format!("width:{:.1}%", frac * 100.0));
+        }
+        if let Ok(Some(badge)) = el.query_selector(".bo-row-count") {
+            if count > 0 {
+                badge.set_text_content(Some(&format!("x{count}")));
+                let _ = badge.remove_attribute("hidden");
+            } else {
+                let _ = badge.set_attribute("hidden", "");
+            }
         }
     }
     let bp = world.registry.get(preview);
@@ -2963,7 +2995,7 @@ fn update_build_overlay(world: &World, preview: ShipClass) {
     };
     if let Some(el) = doc.get_element_by_id("sol-bo-info") {
         el.set_text_content(Some(&format!(
-            "{}    cost {} MU    crew {} {}    build {}s",
+            "{}    cost {} MU    crew {} {}    build {}s    (click a ship to queue)",
             class_label(preview),
             bp.cost as i64,
             bp.crew,
@@ -2978,14 +3010,16 @@ fn update_build_overlay(world: &World, preview: ShipClass) {
             let _ = el.set_attribute("disabled", "");
         }
     }
-    // Homeworld-style build button: a progress "slider" fill for the current
-    // item, plus a yellow xN badge showing the whole queue depth at a glance.
-    let (frac, depth) = match world.build_queue.first() {
-        Some(b) => {
+    // The bottom Build button keeps a progress fill for the previewed class's
+    // lane front, and a yellow xN badge with the total queued across all lanes.
+    let depth = world.build_queued_total();
+    let lane = &world.build_lanes[preview.build_lane().index()];
+    let frac = match lane.first() {
+        Some(b) if b.class == preview => {
             let bt = world.registry.get(b.class).build_time.max(0.001);
-            ((b.progress / bt).clamp(0.0, 1.0), world.build_queue.len())
+            (b.progress / bt).clamp(0.0, 1.0)
         }
-        None => (0.0, 0),
+        _ => 0.0,
     };
     if let Some(el) = doc.get_element_by_id("sol-bo-build-fill") {
         let _ = el.set_attribute("style", &format!("width:{:.1}%", frac * 100.0));

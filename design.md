@@ -908,10 +908,23 @@ pause command instead.
 **Build overlay (Homeworld-style).** The previewed ship is a slow auto-spinning
 turntable; drag it (mouse or finger, on the empty centre of the overlay) to
 inspect it from any angle, and after a short idle it eases back into the spin.
-The **Build** button doubles as the queue readout: a progress "slider" fills it
-as the current ship builds, and a yellow **xN** badge shows how many ships are in
-the queue at a glance. Build mode hides the in-world movement/selection controls
-and the mobile camera pad (there is nothing to move there).
+The previewed ship sits on a blue light-to-dark **horizon gradient** backdrop
+(the nebula is hidden in build mode). Build mode hides the in-world
+movement/selection controls and the mobile camera pad (there is nothing to move
+there).
+
+**Parallel build lanes.** Production runs in **four parallel lanes by hull
+size** (`BuildLane`): **Small** (Fighter, Bomber), **Medium** (Corvette,
+Salvager, Resourcer), **Large** (general/missile Frigate), **Capital**
+(Destroyer). Each lane advances and completes its own front item independently
+in `World::step`, so a stream of fighters never stalls a frigate. The build
+menu is the **ship list, segregated into those four sections**; **clicking a
+ship row queues one** of that class into its lane (and previews it). Each row
+carries its own state: a progress "slider" fill while that class is the lane's
+active build, and a yellow **xN** badge counting how many of that class are
+queued. Matter is still debited up front and crew is reserved across all lanes
+(a queued build can't over-commit the roster). The enemy commander keeps a
+single serial queue (it is AI pacing, not a player-facing UX).
 
 **Camera focus lock.** `F` (or the **Focus** button) anchors the camera on the
 selected ship, or the mothership when nothing is selected, and tracks it each
@@ -1603,18 +1616,22 @@ Three deliverables, all live on GitHub Pages from the first commit:
   amounts and the matter pool are in the checksum); asteroid positions/amounts
   are seeded so they are identical across peers.
 - **Production (prototype build menu):** a full-screen **Build** overlay (opened
-  from the HUD) lists the ship classes down a sidebar and shows the selected one
-  as a slowly rotating **3D preview** (the wgpu canvas renders it behind the
-  overlay's transparent centre while in-world input is suspended). A build needs
-  both **matter and free crew** ([§5](#5-crew-capture--research)); unaffordable
-  options are greyed and the confirm button disables. Matter Units is debited up front
-  (a `Build` command), the front of the queue
-  accrues build time each fixed step, and on completion the ship spawns next to
-  the carrier at a spread angle. The queue and per-item progress are deterministic
-  sim state (in the checksum); the menu, like all controls, drives the same
-  command path on desktop and touch. A HUD readout shows banked matter, the crew
-  pools, and the current build. This closes the gather -> bank -> build economy
-  loop ([§3](#3-core-loop--roguelike-campaign)).
+  from the HUD) lists the ship classes down a sidebar, grouped into the four
+  **size-class sections** (Small / Medium / Large / Capital), and shows the
+  most-recently-clicked one as a slowly rotating **3D preview** on a blue
+  horizon-gradient backdrop (the wgpu canvas renders it behind the overlay's
+  transparent centre while in-world input is suspended). A build needs both
+  **matter and free crew** ([§5](#5-crew-capture--research)); unaffordable
+  options are greyed. **Clicking a ship row queues one** of that class; matter
+  is debited up front (a `Build` command) and the build drops into that class's
+  **lane**. The four lanes accrue build time **in parallel** each fixed step,
+  and on completion the ship spawns next to the carrier at a spread angle. Each
+  row shows its own progress fill + queued **xN** count. The lanes and per-item
+  progress are deterministic sim state (in the checksum); the menu, like all
+  controls, drives the same command path on desktop and touch. A HUD readout
+  shows banked matter, the crew pools, and how many lanes are building. This
+  closes the gather -> bank -> build economy loop
+  ([§3](#3-core-loop--roguelike-campaign)).
 - **Faction livery:** hulls are baked neutral grey with a livery mask in the
   texture alpha; the renderer multiplies a per-instance faction color onto those
   texels only (player blue, enemy red, resourcers forced yellow), so one hull

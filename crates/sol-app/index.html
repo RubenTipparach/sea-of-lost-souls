@@ -171,7 +171,21 @@
         letter-spacing: 0.08em;
         margin-bottom: 6px;
       }
+      /* Class-lane section header (Small / Medium / Large / Capital). */
+      #sol-bo-list .bo-section {
+        color: #7fb0e6;
+        font: 700 11px/1 system-ui, sans-serif;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        margin-top: 8px;
+        padding-bottom: 2px;
+        border-bottom: 1px solid #1d3a57;
+      }
+      /* Ship row: clicking queues one build; a fill bar shows that lane's
+         current build progress and an xN badge shows how many are queued. */
       #sol-bo-list button {
+        position: relative;
+        overflow: hidden;
         appearance: none;
         border: 1px solid #2b6cb0;
         border-radius: 8px;
@@ -180,14 +194,42 @@
         font: 600 14px/1 system-ui, sans-serif;
         padding: 11px 12px;
         text-align: left;
+        display: flex;
+        align-items: center;
+        gap: 8px;
       }
       #sol-bo-list button.sel {
-        background: #1c4a73;
         border-color: #6fb2ee;
         color: #fff;
       }
       #sol-bo-list button.poor {
         opacity: 0.45;
+      }
+      /* Per-row build-progress fill ("time slider"), width set per frame. */
+      .bo-row-fill {
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 0%;
+        background: rgba(120, 235, 165, 0.32);
+        pointer-events: none;
+        transition: width 0.12s linear;
+      }
+      .bo-row-name {
+        position: relative;
+        z-index: 1;
+        flex: 1;
+      }
+      /* Per-row queued-count badge (xN). */
+      .bo-row-count {
+        position: relative;
+        z-index: 1;
+        color: #ffd54a;
+        font-weight: 800;
+      }
+      .bo-row-count[hidden] {
+        display: none;
       }
       /* Bottom info bar: previewed ship stats + confirm / close. */
       #sol-bo-bar {
@@ -482,15 +524,51 @@
     <div id="sol-build-status"></div>
     <div id="sol-build-overlay" hidden>
       <div id="sol-bo-list">
-        <div class="bo-title">BUILD</div>
-        <button id="sol-build-fighter" type="button">Fighter (30)</button>
-        <button id="sol-build-bomber" type="button">Bomber (50)</button>
-        <button id="sol-build-corvette" type="button">Corvette (120)</button>
-        <button id="sol-build-salvager" type="button">Salvager (180)</button>
-        <button id="sol-build-resourcer" type="button">Resourcer (80)</button>
-        <button id="sol-build-frigate_general" type="button">Frigate (300)</button>
-        <button id="sol-build-frigate_missile" type="button">Missile Frigate (340)</button>
-        <button id="sol-build-capital_destroyer" type="button">Destroyer (900)</button>
+        <div class="bo-title">BUILD (click to queue)</div>
+        <div class="bo-section">Small</div>
+        <button id="sol-build-fighter" type="button">
+          <span class="bo-row-fill"></span>
+          <span class="bo-row-name">Fighter (30)</span>
+          <span class="bo-row-count" hidden></span>
+        </button>
+        <button id="sol-build-bomber" type="button">
+          <span class="bo-row-fill"></span>
+          <span class="bo-row-name">Bomber (50)</span>
+          <span class="bo-row-count" hidden></span>
+        </button>
+        <div class="bo-section">Medium</div>
+        <button id="sol-build-corvette" type="button">
+          <span class="bo-row-fill"></span>
+          <span class="bo-row-name">Corvette (120)</span>
+          <span class="bo-row-count" hidden></span>
+        </button>
+        <button id="sol-build-salvager" type="button">
+          <span class="bo-row-fill"></span>
+          <span class="bo-row-name">Salvager (180)</span>
+          <span class="bo-row-count" hidden></span>
+        </button>
+        <button id="sol-build-resourcer" type="button">
+          <span class="bo-row-fill"></span>
+          <span class="bo-row-name">Resourcer (80)</span>
+          <span class="bo-row-count" hidden></span>
+        </button>
+        <div class="bo-section">Large</div>
+        <button id="sol-build-frigate_general" type="button">
+          <span class="bo-row-fill"></span>
+          <span class="bo-row-name">Frigate (300)</span>
+          <span class="bo-row-count" hidden></span>
+        </button>
+        <button id="sol-build-frigate_missile" type="button">
+          <span class="bo-row-fill"></span>
+          <span class="bo-row-name">Missile Frigate (340)</span>
+          <span class="bo-row-count" hidden></span>
+        </button>
+        <div class="bo-section">Capital</div>
+        <button id="sol-build-capital_destroyer" type="button">
+          <span class="bo-row-fill"></span>
+          <span class="bo-row-name">Destroyer (900)</span>
+          <span class="bo-row-count" hidden></span>
+        </button>
       </div>
       <div id="sol-bo-bar">
         <div id="sol-bo-info">Fighter</div>

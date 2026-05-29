@@ -153,6 +153,16 @@ impl ShipClass {
             _ => CrewKind::Ops,
         }
     }
+
+    /// Which parallel build lane this class occupies (fix-it.md item 24).
+    pub fn build_lane(self) -> BuildLane {
+        match self {
+            ShipClass::Fighter | ShipClass::Bomber => BuildLane::Small,
+            ShipClass::Resourcer | ShipClass::Corvette | ShipClass::Salvager => BuildLane::Medium,
+            ShipClass::FrigateGeneral | ShipClass::FrigateMissile => BuildLane::Large,
+            ShipClass::CapitalDestroyer | ShipClass::Carrier => BuildLane::Capital,
+        }
+    }
 }
 
 /// The two crew pools of the logistics roster (`design.md` §5).
@@ -544,12 +554,55 @@ pub struct Gather {
 }
 
 /// A ship under construction at the mothership: which class, and how much build
-/// time has accrued. The queue is processed front-first in [`World::step`];
+/// time has accrued. Each lane is processed front-first in [`World::step`];
 /// matter is paid up front when the build is enqueued.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BuildItem {
     pub class: ShipClass,
     pub progress: f32,
+}
+
+/// Parallel build lanes (fix-it.md item 24): the player builds one ship per
+/// size class at a time, and the lanes progress concurrently, so a stream of
+/// fighters does not stall a frigate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuildLane {
+    Small,
+    Medium,
+    Large,
+    Capital,
+}
+
+/// Number of parallel build lanes.
+pub const BUILD_LANE_COUNT: usize = 4;
+
+impl BuildLane {
+    /// All lanes front-to-back, for stable iteration / UI ordering.
+    pub const ALL: [BuildLane; BUILD_LANE_COUNT] = [
+        BuildLane::Small,
+        BuildLane::Medium,
+        BuildLane::Large,
+        BuildLane::Capital,
+    ];
+
+    /// Index into `World::build_lanes`.
+    pub fn index(self) -> usize {
+        match self {
+            BuildLane::Small => 0,
+            BuildLane::Medium => 1,
+            BuildLane::Large => 2,
+            BuildLane::Capital => 3,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            BuildLane::Small => "Small",
+            BuildLane::Medium => "Medium",
+            BuildLane::Large => "Large",
+            BuildLane::Capital => "Capital",
+        }
+    }
 }
 
 /// One simulated entity. `prev_transform` holds the previous step's transform
@@ -694,7 +747,9 @@ pub struct World {
     /// enemy mothership. Spent by the commander AI to queue new enemy builds.
     pub enemy_matter: f32,
     /// Ships under construction at the mothership (front item builds first).
-    pub build_queue: Vec<BuildItem>,
+    /// Player build lanes (fix-it.md item 24): four parallel queues by size
+    /// class, each advancing its own front item concurrently.
+    pub build_lanes: [Vec<BuildItem>; BUILD_LANE_COUNT],
     /// Enemy mothership's build queue, populated by the commander AI.
     pub enemy_build_queue: Vec<BuildItem>,
     /// Counter the commander rotates through combat classes with on each queue.
@@ -733,7 +788,7 @@ impl World {
             resource_nodes: Vec::new(),
             matter: 0.0,
             enemy_matter: 0.0,
-            build_queue: Vec::new(),
+            build_lanes: Default::default(),
             enemy_build_queue: Vec::new(),
             enemy_build_index: 0,
             enemy_wave: None,
@@ -788,7 +843,7 @@ impl World {
             .entities
             .iter()
             .map(|e| e.ship.class)
-            .chain(self.build_queue.iter().map(|b| b.class));
+            .chain(self.build_lanes.iter().flatten().map(|b| b.class));
         for class in classes {
             if class == ShipClass::Carrier {
                 continue;
@@ -808,6 +863,11 @@ impl World {
         let (co, cp) = self.crew_capacity();
         let (uo, up) = self.crew_used();
         (co as i32 - uo as i32, cp as i32 - up as i32)
+    }
+
+    /// Total ships queued across all build lanes (HUD / tests).
+    pub fn build_queued_total(&self) -> usize {
+        self.build_lanes.iter().map(|l| l.len()).sum()
     }
 
     /// Whether a build of `class` can be afforded right now (matter + crew).
@@ -1356,7 +1416,7 @@ impl World {
                     // already count toward used crew, so this can't over-commit).
                     if self.can_build(class) {
                         self.matter -= self.registry.get(class).cost;
-                        self.build_queue.push(BuildItem {
+                        self.build_lanes[class.build_lane().index()].push(BuildItem {
                             class,
                             progress: 0.0,
                         });
@@ -2101,21 +2161,24 @@ impl World {
         }
 
         // 5) Production: advance each team's front build at its mothership; when
-        // it finishes, spawn the ship near the carrier at a spread angle.
-        if let Some(front) = self.build_queue.first_mut() {
-            front.progress += dt;
-        }
-        let player_done = self
-            .build_queue
-            .first()
-            .copied()
-            .filter(|f| f.progress >= self.registry.get(f.class).build_time);
-        if let Some(front) = player_done {
-            self.build_queue.remove(0);
-            let (center, cr) = depot.unwrap_or((Vec3::ZERO, 8.0));
-            let angle = self.next_id as f32 * 2.399_963;
-            let off = Vec3::new(angle.cos(), 0.0, angle.sin()) * (cr + 5.0);
-            self.spawn_class(front.class, Team::Player, center + off);
+        // it finishes, spawn the ship near the carrier at a spread angle. The
+        // player runs four lanes in parallel (fix-it.md item 24), so each lane
+        // advances and completes independently this step.
+        for lane in 0..BUILD_LANE_COUNT {
+            if let Some(front) = self.build_lanes[lane].first_mut() {
+                front.progress += dt;
+            }
+            let done = self.build_lanes[lane]
+                .first()
+                .copied()
+                .filter(|f| f.progress >= self.registry.get(f.class).build_time);
+            if let Some(front) = done {
+                self.build_lanes[lane].remove(0);
+                let (center, cr) = depot.unwrap_or((Vec3::ZERO, 8.0));
+                let angle = self.next_id as f32 * 2.399_963;
+                let off = Vec3::new(angle.cos(), 0.0, angle.sin()) * (cr + 5.0);
+                self.spawn_class(front.class, Team::Player, center + off);
+            }
         }
         if let Some(front) = self.enemy_build_queue.first_mut() {
             front.progress += dt;
@@ -2192,9 +2255,11 @@ impl World {
             h = fnv1a(h, n.id.0);
             h = fnv1a(h, n.amount.to_bits());
         }
-        for b in &self.build_queue {
-            h = fnv1a(h, b.class as u32);
-            h = fnv1a(h, b.progress.to_bits());
+        for lane in &self.build_lanes {
+            for b in lane {
+                h = fnv1a(h, b.class as u32);
+                h = fnv1a(h, b.progress.to_bits());
+            }
         }
         for b in &self.enemy_build_queue {
             h = fnv1a(h, b.class as u32);
@@ -3252,13 +3317,13 @@ mod tests {
         w.step(TICK_DT);
         // Paid up front and queued.
         assert_eq!(w.matter, 500.0 - cost);
-        assert_eq!(w.build_queue.len(), 1);
+        assert_eq!(w.build_queued_total(), 1);
         // Finishes within its build time and spawns one ship.
         let bt = w.registry.get(ShipClass::Corvette).build_time;
         for _ in 0..((bt * TICK_HZ as f32) as u32 + 2) {
             w.step(TICK_DT);
         }
-        assert!(w.build_queue.is_empty(), "build did not finish");
+        assert_eq!(w.build_queued_total(), 0, "build did not finish");
         assert_eq!(w.entities.len(), before + 1, "no ship spawned");
         assert!(w
             .entities
@@ -3303,8 +3368,9 @@ mod tests {
 
         // Build debited + queued immediately, but it has not progressed.
         assert_eq!(w.matter, 500.0 - cost);
-        assert_eq!(w.build_queue.len(), 1);
-        assert_eq!(w.build_queue[0].progress, 0.0);
+        assert_eq!(w.build_queued_total(), 1);
+        // Fighter goes in the Small lane (index 0).
+        assert_eq!(w.build_lanes[BuildLane::Small.index()][0].progress, 0.0);
         // Move order registered, but the ship has not moved and no tick elapsed.
         assert_eq!(w.entity(id).unwrap().order, Some(Vec3::new(20.0, 0.0, 0.0)));
         assert_eq!(w.entity(id).unwrap().transform.pos, Vec3::ZERO);
@@ -3320,7 +3386,7 @@ mod tests {
             class: ShipClass::Fighter,
         });
         w.step(TICK_DT);
-        assert!(w.build_queue.is_empty(), "built with no crew capacity");
+        assert_eq!(w.build_queued_total(), 0, "built with no crew capacity");
         assert_eq!(w.matter, 1000.0, "matter spent despite no crew");
     }
 
@@ -3333,7 +3399,7 @@ mod tests {
             class: ShipClass::Fighter,
         });
         w.step(TICK_DT);
-        assert!(w.build_queue.is_empty());
+        assert_eq!(w.build_queued_total(), 0);
         assert_eq!(w.matter, 5.0);
     }
 
