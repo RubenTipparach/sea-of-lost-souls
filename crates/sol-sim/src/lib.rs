@@ -724,6 +724,15 @@ pub enum Command {
     /// Queue a ship of `class` for construction at the mothership; matter is
     /// debited immediately (ignored if unaffordable).
     Build { class: ShipClass },
+    /// Cancel one queued build of `class` and refund its matter (fix-it.md
+    /// item 27). Removes the last queued item of that class in its lane; if
+    /// that item is the lane's active build, its accumulated progress is
+    /// discarded. No-op when nothing of this class is queued.
+    CancelBuild { class: ShipClass },
+    /// Toggle the paused state of a player build lane (fix-it.md item 30).
+    /// While paused, the lane's active build does not accrue progress; the
+    /// queue is preserved.
+    ToggleLanePause { lane: BuildLane },
 }
 
 /// The deterministic simulation world.
@@ -750,6 +759,9 @@ pub struct World {
     /// Player build lanes (fix-it.md item 24): four parallel queues by size
     /// class, each advancing its own front item concurrently.
     pub build_lanes: [Vec<BuildItem>; BUILD_LANE_COUNT],
+    /// Per-lane paused state (fix-it.md item 30). A paused lane still holds
+    /// its queue but does not accrue build progress.
+    pub build_lane_paused: [bool; BUILD_LANE_COUNT],
     /// Enemy mothership's build queue, populated by the commander AI.
     pub enemy_build_queue: Vec<BuildItem>,
     /// Counter the commander rotates through combat classes with on each queue.
@@ -789,6 +801,7 @@ impl World {
             matter: 0.0,
             enemy_matter: 0.0,
             build_lanes: Default::default(),
+            build_lane_paused: [false; BUILD_LANE_COUNT],
             enemy_build_queue: Vec::new(),
             enemy_build_index: 0,
             enemy_wave: None,
@@ -1421,6 +1434,19 @@ impl World {
                             progress: 0.0,
                         });
                     }
+                }
+                Command::CancelBuild { class } => {
+                    // Refund the most recently queued of this class (the user's
+                    // last click). LIFO matches the typical "oops, drop one" UX.
+                    let lane = &mut self.build_lanes[class.build_lane().index()];
+                    if let Some(pos) = lane.iter().rposition(|b| b.class == class) {
+                        lane.remove(pos);
+                        self.matter += self.registry.get(class).cost;
+                    }
+                }
+                Command::ToggleLanePause { lane } => {
+                    let idx = lane.index();
+                    self.build_lane_paused[idx] = !self.build_lane_paused[idx];
                 }
             }
         }
@@ -2163,10 +2189,13 @@ impl World {
         // 5) Production: advance each team's front build at its mothership; when
         // it finishes, spawn the ship near the carrier at a spread angle. The
         // player runs four lanes in parallel (fix-it.md item 24), so each lane
-        // advances and completes independently this step.
+        // advances and completes independently this step. Paused lanes
+        // (item 30) keep their queue but accrue no progress.
         for lane in 0..BUILD_LANE_COUNT {
-            if let Some(front) = self.build_lanes[lane].first_mut() {
-                front.progress += dt;
+            if !self.build_lane_paused[lane] {
+                if let Some(front) = self.build_lanes[lane].first_mut() {
+                    front.progress += dt;
+                }
             }
             let done = self.build_lanes[lane]
                 .first()
@@ -2255,7 +2284,8 @@ impl World {
             h = fnv1a(h, n.id.0);
             h = fnv1a(h, n.amount.to_bits());
         }
-        for lane in &self.build_lanes {
+        for (i, lane) in self.build_lanes.iter().enumerate() {
+            h = fnv1a(h, self.build_lane_paused[i] as u32);
             for b in lane {
                 h = fnv1a(h, b.class as u32);
                 h = fnv1a(h, b.progress.to_bits());
@@ -3401,6 +3431,73 @@ mod tests {
         w.step(TICK_DT);
         assert_eq!(w.build_queued_total(), 0);
         assert_eq!(w.matter, 5.0);
+    }
+
+    #[test]
+    fn cancel_build_refunds_matter_and_pops_lane() {
+        let mut w = World::new(7);
+        w.spawn_class(ShipClass::Carrier, Team::Player, Vec3::ZERO);
+        let cost = w.registry.get(ShipClass::Fighter).cost;
+        w.matter = cost * 3.0;
+        for _ in 0..3 {
+            w.enqueue(Command::Build {
+                class: ShipClass::Fighter,
+            });
+        }
+        w.apply_commands();
+        assert_eq!(w.build_queued_total(), 3);
+        assert_eq!(w.matter, 0.0);
+        w.enqueue(Command::CancelBuild {
+            class: ShipClass::Fighter,
+        });
+        w.apply_commands();
+        assert_eq!(w.build_queued_total(), 2, "one fighter should be cancelled");
+        assert_eq!(w.matter, cost, "matter should be refunded");
+        // Cancelling a class that's not queued is a no-op.
+        let m_before = w.matter;
+        w.enqueue(Command::CancelBuild {
+            class: ShipClass::Bomber,
+        });
+        w.apply_commands();
+        assert_eq!(w.matter, m_before, "no refund when nothing was queued");
+        assert_eq!(w.build_queued_total(), 2);
+    }
+
+    #[test]
+    fn paused_lane_holds_progress() {
+        let mut w = World::new(9);
+        w.spawn_class(ShipClass::Carrier, Team::Player, Vec3::ZERO);
+        let cost = w.registry.get(ShipClass::Fighter).cost;
+        w.matter = cost;
+        w.enqueue(Command::Build {
+            class: ShipClass::Fighter,
+        });
+        w.apply_commands();
+        // Build one tick of progress, then pause: subsequent ticks must not
+        // advance the lane.
+        w.step(TICK_DT);
+        let p0 = w.build_lanes[BuildLane::Small.index()][0].progress;
+        assert!(p0 > 0.0);
+        w.enqueue(Command::ToggleLanePause {
+            lane: BuildLane::Small,
+        });
+        w.apply_commands();
+        for _ in 0..30 {
+            w.step(TICK_DT);
+        }
+        let p1 = w.build_lanes[BuildLane::Small.index()][0].progress;
+        assert!(
+            (p1 - p0).abs() < 1e-3,
+            "paused lane progressed: {p0} -> {p1}",
+        );
+        // Unpause and verify it resumes.
+        w.enqueue(Command::ToggleLanePause {
+            lane: BuildLane::Small,
+        });
+        w.apply_commands();
+        w.step(TICK_DT);
+        let p2 = w.build_lanes[BuildLane::Small.index()][0].progress;
+        assert!(p2 > p1, "resumed lane did not accrue progress");
     }
 
     #[test]

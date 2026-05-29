@@ -50,6 +50,30 @@ Items that fail get moved back to Pending with a note on what's still wrong.
   (Small / Medium / Large / Capital via `ShipClass::build_lane`); all four
   lanes advance + complete concurrently each step; crew reservation + checksum
   sum across lanes. UI: the build overlay sidebar is now four labeled sections;
-  **clicking a ship row queues one** of that class (and previews it); each row
-  shows its own progress-fill "slider" + yellow **xN** queued badge. The bottom
-  Build button still queues the previewed class. Enemy keeps its serial queue.
+  each row shows its own progress-fill "slider" + yellow **xN** queued badge.
+  Enemy keeps its serial queue. (Click flow updated by items 27, 30, 31 below.)
+- [ ] **(25) Resources visible in the build menu.** New `#sol-bo-resources`
+  line at the top of the sidebar shows **MU / ops / pilots / queue total**,
+  refreshed each frame from `World::crew_capacity` + `crew_free`.
+- [ ] **(26) No grid dots in the build preview.** The build-preview render
+  path calls `set_grid(&[])` so only the gradient backdrop shows.
+- [ ] **(27) Right-click a row to cancel + refund.** New
+  `Command::CancelBuild { class }` removes the most recently queued item of
+  that class from its lane and refunds its MU; row `contextmenu` listener
+  fires `CancelBuildRow` and `event.preventDefault()`s the browser menu.
+- [ ] **(28) Bottom HUD hidden in build mode.** `show_build_overlay`
+  toggles a `body.sol-build-open` class; CSS hides `#sol-controls` plus the
+  MU / queue / pending / crew corner readouts while it's set. The Build
+  toggle button stays on the main HUD (you need it to re-open later).
+- [ ] **(29) Global Build / Pause buttons removed.** The overlay's bottom
+  bar is just the info text + Close now. Queueing happens via row clicks;
+  pausing is per-lane (item 30).
+- [ ] **(30) Per-lane Pause / Resume control.** New
+  `Command::ToggleLanePause { lane }` + `World.build_lane_paused[4]`; the
+  production pass skips paused lanes (queue preserved). Each row carries a
+  `.bo-row-pause` chip (`||`) that flips to play (`>`) when the lane is
+  paused; click stops propagation so the row's left-click doesn't also fire.
+  Info line appends `[lane paused]` when the previewed class's lane is.
+- [ ] **(31) Two-click build flow.** `UiCmd::ClickBuildRow(class)`: if the
+  row is already the previewed class, queue one; otherwise just select
+  (preview) it. Picking a different class is a pure re-select.

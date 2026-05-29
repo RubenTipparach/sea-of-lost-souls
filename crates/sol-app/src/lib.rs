@@ -620,8 +620,10 @@ impl App {
             gfx.renderer.set_scene_dim([0.0, 0.0, 0.0, 0.0]);
             gfx.renderer.set_sensor_spheres(&[]);
             // Preview backdrop: hide the nebula/stars and paint a blue light->dark
-            // horizon gradient behind the ship (fix-it.md item 17).
+            // horizon gradient behind the ship (fix-it.md item 17). Also hide
+            // the tactical grid dots: clean backdrop only (item 26).
             gfx.renderer.set_background_visible(false);
+            gfx.renderer.set_grid(&[]);
             gfx.renderer
                 .set_build_backdrop(Some(([0.18, 0.34, 0.55], [0.02, 0.05, 0.12])));
             let groups: Vec<(&GpuMesh, &[MeshInstance])> = gfx
@@ -2102,15 +2104,22 @@ impl App {
                     self.build_open = false;
                     show_build_overlay(false);
                 }
-                // Clicking a ship row both previews it and queues one build
-                // into its lane (fix-it.md item 24).
-                UiCmd::QueueBuild(class) => {
-                    self.build_preview = class;
-                    self.world.enqueue(Command::Build { class });
+                // Two-click flow (fix-it.md item 31): first click on a row
+                // selects/previews that class; a second click on the *same*
+                // row queues one. Clicking a different row just re-selects.
+                UiCmd::ClickBuildRow(class) => {
+                    if self.build_preview == class {
+                        self.world.enqueue(Command::Build { class });
+                    } else {
+                        self.build_preview = class;
+                    }
                 }
-                UiCmd::BuildSelected => self.world.enqueue(Command::Build {
-                    class: self.build_preview,
-                }),
+                UiCmd::CancelBuildRow(class) => {
+                    self.world.enqueue(Command::CancelBuild { class });
+                }
+                UiCmd::ToggleLanePause(lane) => {
+                    self.world.enqueue(Command::ToggleLanePause { lane });
+                }
                 UiCmd::TogglePause => self.toggle_pause(),
                 UiCmd::ToggleFocus => self.toggle_focus(),
                 UiCmd::ToggleSensors => self.toggle_sensors(),
@@ -2736,10 +2745,14 @@ enum UiCmd {
     /// Open / close the full-screen build overlay.
     OpenBuild,
     CloseBuild,
-    /// Queue one build of a class (and preview it) from its build-menu row.
-    QueueBuild(ShipClass),
-    /// Queue the currently previewed class for construction (if affordable).
-    BuildSelected,
+    /// Left-click on a build-menu row: select/preview the class, or queue one
+    /// if the same row is already previewed (fix-it.md item 31).
+    ClickBuildRow(ShipClass),
+    /// Right-click on a build-menu row: cancel one queued build of that class
+    /// from its lane and refund the matter (fix-it.md item 27).
+    CancelBuildRow(ShipClass),
+    /// Per-row Pause / Resume toggle for one build lane (fix-it.md item 30).
+    ToggleLanePause(sol_sim::BuildLane),
     /// Toggle the single-player sim pause.
     TogglePause,
     /// Toggle camera lock-on to the selected ship (or mothership).
@@ -2799,10 +2812,9 @@ fn wire_dom_controls() {
             cb.forget();
         }
     }
-    // Build overlay open/confirm/close.
+    // Build overlay open/close.
     for (id, cmd) in [
         ("sol-build-toggle", UiCmd::OpenBuild),
-        ("sol-bo-build", UiCmd::BuildSelected),
         ("sol-bo-close", UiCmd::CloseBuild),
     ] {
         if let Some(el) = doc.get_element_by_id(id) {
@@ -2811,13 +2823,32 @@ fn wire_dom_controls() {
             cb.forget();
         }
     }
-    // Build-overlay ship rows: clicking one queues a build of that class (and
-    // previews it). Parallel lanes mean clicks across classes build at once.
+    // Build-overlay ship rows (fix-it.md items 27, 30, 31):
+    //   * left click  -> ClickBuildRow  (select / queue toggle)
+    //   * right click -> CancelBuildRow (cancel + refund)
+    //   * click on .bo-row-pause -> ToggleLanePause (and stop propagation
+    //     so the row's own click handler doesn't also fire)
     for (id, class) in BUILD_BUTTONS {
-        if let Some(el) = doc.get_element_by_id(id) {
-            let cb = Closure::<dyn FnMut()>::new(move || push_ui(UiCmd::QueueBuild(class)));
-            let _ = el.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref());
-            cb.forget();
+        let Some(el) = doc.get_element_by_id(id) else {
+            continue;
+        };
+        let click = Closure::<dyn FnMut()>::new(move || push_ui(UiCmd::ClickBuildRow(class)));
+        let _ = el.add_event_listener_with_callback("click", click.as_ref().unchecked_ref());
+        click.forget();
+        let ctx = Closure::<dyn FnMut(web_sys::Event)>::new(move |ev: web_sys::Event| {
+            ev.prevent_default();
+            push_ui(UiCmd::CancelBuildRow(class));
+        });
+        let _ = el.add_event_listener_with_callback("contextmenu", ctx.as_ref().unchecked_ref());
+        ctx.forget();
+        if let Ok(Some(pause)) = el.query_selector(".bo-row-pause") {
+            let lane = class.build_lane();
+            let pcb = Closure::<dyn FnMut(web_sys::Event)>::new(move |ev: web_sys::Event| {
+                ev.stop_propagation();
+                push_ui(UiCmd::ToggleLanePause(lane));
+            });
+            let _ = pause.add_event_listener_with_callback("click", pcb.as_ref().unchecked_ref());
+            pcb.forget();
         }
     }
     // Box-select is a press-and-hold: arm on pointer down, disarm on release
@@ -2946,6 +2977,12 @@ fn show_build_overlay(show: bool) {
             }
         }
     }
+    // Body class drives the CSS that hides the corner HUD readouts (MU
+    // counter, crew, queue) while the overlay is open (fix-it.md item 28).
+    if let Some(body) = doc.body() {
+        let cl = body.class_list();
+        let _ = cl.toggle_with_force("sol-build-open", show);
+    }
 }
 
 /// Per-frame build-overlay refresh: highlight the previewed class, dim the
@@ -2967,7 +3004,8 @@ fn update_build_overlay(world: &World, preview: ShipClass) {
         // Per-row queue state (fix-it.md item 24): the "time slider" fill shows
         // this lane's current build progress when this class is its front item;
         // the xN badge counts how many of THIS class are queued in the lane.
-        let lane = &world.build_lanes[class.build_lane().index()];
+        let lane_idx = class.build_lane().index();
+        let lane = &world.build_lanes[lane_idx];
         let count = lane.iter().filter(|b| b.class == class).count();
         let frac = match lane.first() {
             Some(b) if b.class == class => {
@@ -2987,50 +3025,54 @@ fn update_build_overlay(world: &World, preview: ShipClass) {
                 let _ = badge.set_attribute("hidden", "");
             }
         }
+        // Per-lane Pause/Resume button (fix-it.md item 30): only visible when
+        // there's something in the lane. Glyph + class flip between Pause and
+        // Play depending on `build_lane_paused`.
+        if let Ok(Some(pause)) = el.query_selector(".bo-row-pause") {
+            let lane_has_work = !lane.is_empty();
+            if lane_has_work {
+                let _ = pause.remove_attribute("hidden");
+                let paused = world.build_lane_paused[lane_idx];
+                let _ = pause.class_list().toggle_with_force("paused", paused);
+                pause.set_text_content(Some(if paused {
+                    "\u{25B6}"
+                } else {
+                    "\u{258C}\u{258C}"
+                }));
+            } else {
+                let _ = pause.set_attribute("hidden", "");
+            }
+        }
     }
     let bp = world.registry.get(preview);
     let kind = match preview.crew_kind() {
         CrewKind::Ops => "ops",
         CrewKind::Pilots => "pilots",
     };
+    let lane_paused = world.build_lane_paused[preview.build_lane().index()];
+    let pause_tag = if lane_paused { "  [lane paused]" } else { "" };
     if let Some(el) = doc.get_element_by_id("sol-bo-info") {
         el.set_text_content(Some(&format!(
-            "{}    cost {} MU    crew {} {}    build {}s    (click a ship to queue)",
+            "{}    cost {} MU    crew {} {}    build {}s{}",
             class_label(preview),
             bp.cost as i64,
             bp.crew,
             kind,
-            bp.build_time as i64
+            bp.build_time as i64,
+            pause_tag,
         )));
     }
-    if let Some(el) = doc.get_element_by_id("sol-bo-build") {
-        if world.can_build(preview) {
-            let _ = el.remove_attribute("disabled");
-        } else {
-            let _ = el.set_attribute("disabled", "");
-        }
-    }
-    // The bottom Build button keeps a progress fill for the previewed class's
-    // lane front, and a yellow xN badge with the total queued across all lanes.
-    let depth = world.build_queued_total();
-    let lane = &world.build_lanes[preview.build_lane().index()];
-    let frac = match lane.first() {
-        Some(b) if b.class == preview => {
-            let bt = world.registry.get(b.class).build_time.max(0.001);
-            (b.progress / bt).clamp(0.0, 1.0)
-        }
-        _ => 0.0,
-    };
-    if let Some(el) = doc.get_element_by_id("sol-bo-build-fill") {
-        let _ = el.set_attribute("style", &format!("width:{:.1}%", frac * 100.0));
-    }
-    if let Some(el) = doc.get_element_by_id("sol-bo-count") {
-        if depth > 0 {
-            el.set_text_content(Some(&format!("x{depth}")));
-            let _ = el.remove_attribute("hidden");
-        } else {
-            let _ = el.set_attribute("hidden", "");
-        }
+    // Sidebar resources line (fix-it.md item 25): MU + crew + queue total,
+    // visible without closing the overlay. `crew_capacity` is the carrier's
+    // pool; `crew_free` can go negative if the carrier died.
+    if let Some(el) = doc.get_element_by_id("sol-bo-resources") {
+        let (cap_ops, cap_pilots) = world.crew_capacity();
+        let (free_ops, free_pilots) = world.crew_free();
+        let depth = world.build_queued_total();
+        el.set_text_content(Some(&format!(
+            "MU {}    ops {}/{}    pilots {}/{}    queue {}",
+            world.matter as i64, free_ops, cap_ops, free_pilots, cap_pilots, depth,
+        )));
     }
 }
 
