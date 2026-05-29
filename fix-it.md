@@ -20,7 +20,17 @@ Items that fail get moved back to Pending with a note on what's still wrong.
 
 ## Pending
 
-(none)
+- [ ] **(33) Integrated desktop UI (in-canvas, not DOM).** The build menu and
+  the various functional buttons (Sensors, Build toggle, Pause, Focus,
+  stance dropdown, MU / crew / queue readouts, selection panels) need to be
+  rendered **inside the wgpu canvas** (egui via `egui_wgpu`, or equivalent
+  integrated UI), not as HTML/DOM elements. Per the updated CLAUDE.md rule:
+  the existing DOM overlay (`#sol-controls`, `#sol-build-overlay`, etc.)
+  becomes the **mobile-only test harness**; desktop builds hide it and use
+  the integrated UI; both surfaces drive the same wasm-exported commands.
+  This is a multi-PR migration: scaffold egui_wgpu, port one panel at a
+  time (start with the build menu), keep tests green, then switch the desktop
+  default. Not gated on items below validating - it's a separate track.
 
 ## Awaiting validation
 
@@ -52,11 +62,20 @@ Items that fail get moved back to Pending with a note on what's still wrong.
   sum across lanes. UI: the build overlay sidebar is now four labeled sections;
   each row shows its own progress-fill "slider" + yellow **xN** queued badge.
   Enemy keeps its serial queue. (Click flow updated by items 27, 30, 31 below.)
-- [ ] **(25) Resources visible in the build menu.** New `#sol-bo-resources`
-  line at the top of the sidebar shows **MU / ops / pilots / queue total**,
-  refreshed each frame from `World::crew_capacity` + `crew_free`.
+- [ ] **(25) Resources visible in the build menu.** Three chips at the top
+  of the sidebar - **MU / Crew / Pilots** - refreshed each frame from
+  `World::crew_capacity` + `crew_free`. (Layout reorganized per item 32.)
+- [ ] **(32) Per-section capacity in the build menu.** Each size-class
+  header (Small / Medium / Large / Capital) shows `can build N` based on the
+  cheapest class in that section, accounting for both MU and free crew of
+  the right kind. Hidden when zero so the header doesn't add noise mid-fight.
+  Backed by a new `World::capacity_for(class) -> u32` helper.
 - [ ] **(26) No grid dots in the build preview.** The build-preview render
   path calls `set_grid(&[])` so only the gradient backdrop shows.
+  **Regression fixed:** `Renderer::set_grid` previously panicked on the
+  empty-slice case (`buffer slices can not be empty` -> winit RefCell unwind
+  -> build menu frozen). Now an empty grid just sets `grid_count = 0` and
+  the draw is gated on it.
 - [ ] **(27) Right-click a row to cancel + refund.** New
   `Command::CancelBuild { class }` removes the most recently queued item of
   that class from its lane and refunds its MU; row `contextmenu` listener

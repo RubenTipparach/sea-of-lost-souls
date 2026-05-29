@@ -1013,10 +1013,16 @@ impl Renderer {
 
     /// Re-upload only the grid points (fix-it.md item 13: the grid follows the
     /// camera pivot each frame). Cheap: the grid is hundreds of vertices.
+    /// Passing an empty slice just zeroes the draw count (keeps the existing
+    /// buffer); wgpu's `create_buffer_init` panics on empty contents.
     pub fn set_grid(&mut self, grid: &[BgVertex]) {
         let Some(env) = self.environment.as_mut() else {
             return;
         };
+        if grid.is_empty() {
+            env.grid_count = 0;
+            return;
+        }
         let grid_vbuf = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1200,9 +1206,11 @@ impl Renderer {
                     pass.set_vertex_buffer(0, env.star_inst_buf.slice(..));
                     pass.draw(0..6, 0..env.star_count);
                 }
-                pass.set_pipeline(&self.points_near_pipeline);
-                pass.set_vertex_buffer(0, env.grid_vbuf.slice(..));
-                pass.draw(0..env.grid_count, 0..1);
+                if env.grid_count > 0 {
+                    pass.set_pipeline(&self.points_near_pipeline);
+                    pass.set_vertex_buffer(0, env.grid_vbuf.slice(..));
+                    pass.draw(0..env.grid_count, 0..1);
+                }
             }
 
             pass.set_pipeline(&self.pipeline);

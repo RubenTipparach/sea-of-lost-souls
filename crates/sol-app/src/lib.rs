@@ -3063,16 +3063,52 @@ fn update_build_overlay(world: &World, preview: ShipClass) {
         )));
     }
     // Sidebar resources line (fix-it.md item 25): MU + crew + queue total,
-    // visible without closing the overlay. `crew_capacity` is the carrier's
-    // pool; `crew_free` can go negative if the carrier died.
-    if let Some(el) = doc.get_element_by_id("sol-bo-resources") {
+    // (fix-it.md items 25 + 32) three category chips - MU / Crew / Pilots -
+    // and a per-section "can build N" capacity badge. `crew_free` can go
+    // negative if the carrier dies; display as a signed count.
+    {
         let (cap_ops, cap_pilots) = world.crew_capacity();
         let (free_ops, free_pilots) = world.crew_free();
-        let depth = world.build_queued_total();
-        el.set_text_content(Some(&format!(
-            "MU {}    ops {}/{}    pilots {}/{}    queue {}",
-            world.matter as i64, free_ops, cap_ops, free_pilots, cap_pilots, depth,
-        )));
+        set_chip_value(&doc, "sol-bo-res-mu", &format!("{}", world.matter as i64));
+        set_chip_value(&doc, "sol-bo-res-crew", &format!("{free_ops}/{cap_ops}"));
+        set_chip_value(
+            &doc,
+            "sol-bo-res-pilots",
+            &format!("{free_pilots}/{cap_pilots}"),
+        );
+    }
+    for (sec_id, lane) in [
+        ("sol-bo-sec-small", sol_sim::BuildLane::Small),
+        ("sol-bo-sec-medium", sol_sim::BuildLane::Medium),
+        ("sol-bo-sec-large", sol_sim::BuildLane::Large),
+        ("sol-bo-sec-capital", sol_sim::BuildLane::Capital),
+    ] {
+        let cap = BUILD_BUTTONS
+            .iter()
+            .filter(|(_, c)| c.build_lane() == lane)
+            .map(|(_, c)| world.capacity_for(*c))
+            .max()
+            .unwrap_or(0);
+        if let Some(sec) = doc.get_element_by_id(sec_id) {
+            if let Ok(Some(cap_el)) = sec.query_selector(".bo-sec-cap") {
+                if cap > 0 {
+                    cap_el.set_text_content(Some(&format!("can build {cap}")));
+                    let _ = cap_el.remove_attribute("hidden");
+                } else {
+                    let _ = cap_el.set_attribute("hidden", "");
+                }
+            }
+        }
+    }
+}
+
+/// Set the value (`.bo-res-v`) inside a sidebar resources chip by id.
+#[cfg(target_arch = "wasm32")]
+fn set_chip_value(doc: &web_sys::Document, chip_id: &str, value: &str) {
+    if let Some(chip) = doc.get_element_by_id(chip_id) {
+        if let Ok(Some(v)) = chip.query_selector(".bo-res-v") {
+            v.set_text_content(Some(value));
+        }
     }
 }
 

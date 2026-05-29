@@ -883,6 +883,25 @@ impl World {
         self.build_lanes.iter().map(|l| l.len()).sum()
     }
 
+    /// How many more ships of `class` could the carrier afford right now,
+    /// given current `matter` and free crew of the right kind. Capped at
+    /// `u16::MAX` for sane HUD display. Returns 0 if the class costs nothing
+    /// (data-driven safety; should not happen for real ships).
+    pub fn capacity_for(&self, class: ShipClass) -> u32 {
+        let bp = self.registry.get(class);
+        if bp.cost <= 0.0 || bp.crew == 0 {
+            return 0;
+        }
+        let by_matter = (self.matter / bp.cost).max(0.0) as u32;
+        let (free_ops, free_pilots) = self.crew_free();
+        let free = match class.crew_kind() {
+            CrewKind::Ops => free_ops.max(0) as u32,
+            CrewKind::Pilots => free_pilots.max(0) as u32,
+        };
+        let by_crew = free / bp.crew;
+        by_matter.min(by_crew).min(u16::MAX as u32)
+    }
+
     /// Whether a build of `class` can be afforded right now (matter + crew).
     pub fn can_build(&self, class: ShipClass) -> bool {
         let bp = self.registry.get(class);

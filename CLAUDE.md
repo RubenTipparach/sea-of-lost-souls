@@ -97,14 +97,19 @@ progress; consult `design.md` §12 & §18 for the intended layout.)
   WebGL2 fallback). Avoid native-only APIs in shared crates; feature-gate
   desktop-only code. Prefer single-threaded-safe designs unless we deliberately
   enable wasm threads (which require the COOP/COEP service-worker shim on Pages).
-- **Mobile-testable gameplay.** The target experience is desktop (mouse +
-  keyboard), but every gameplay feature must *also* be exercisable in a
-  phone/tablet browser, because mobile testing saves significant iteration time.
-  Expect to add a lightweight DOM control overlay (HTML buttons/menus outside the
-  wgpu canvas) and basic touch input (tap to select/move) that drive the *same*
-  wasm-exported commands as the desktop path. Mobile is a **test harness**, not a
-  polished touch UX: keep it minimal but functional, and never ship a gameplay
-  feature that can only be tested on desktop.
+- **Desktop UI is integrated (in-canvas); the DOM is mobile-only.** The target
+  experience is desktop (mouse + keyboard), and **desktop control surfaces
+  must be rendered inside the wgpu canvas as integrated UI** (e.g. egui via
+  `egui_wgpu`), not as separate HTML/DOM elements. This includes the build
+  menu, Sensors / Build / Pause / Focus buttons, the stance dropdown, the MU /
+  crew / queue readouts, and any future selection/command panels. The DOM
+  overlay (`#sol-controls`, `#sol-build-overlay`, etc.) is a **mobile test
+  harness** only: it exists to keep gameplay exercisable on a phone/tablet
+  while we iterate, and it drives the *same* wasm-exported commands as the
+  desktop path. The DOM overlay is hidden on desktop builds; the integrated
+  UI is hidden on mobile. Every gameplay feature must remain reachable on
+  both surfaces, but the desktop UI is the polished one and the mobile UI
+  stays minimal.
 - **Authored assets are the source of truth.** Commit `model.glb` + `ship.json`;
   never commit `assets/compiled/`. `sol-shipc` is the gate - bad colliders or
   invalid ship data should fail the build.
